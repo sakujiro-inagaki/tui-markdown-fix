@@ -1,0 +1,394 @@
+// Inline-pass parser: walks a `String` byte-by-byte and emits `Array Inline`.
+//
+// v0.1 limitation: greedy outside-in matching, no CommonMark left/right-
+// flanking delimiter run rules. Unmatched delimiters degrade to literal
+// text. Hard breaks (`line_break`) are inserted by the block-pass parser
+// — they originate from `>=2 trailing spaces` on a paragraph line, which
+// the block pass strips before calling here.
+//
+// Recognized delimiters: `` ` `` (code), `*`/`**` (emph/strong), `_`/`__`
+// (emph/strong, outside-word only), `~~` (strikethrough), `[` (link),
+// `![` (image), `<` (autolink / raw_html), bare `http(s)://` URLs in text.
+module Yaynu.Markdown.Parser.Inline;
+
+import Yaynu.Markdown.Ast;
+
+// --- public entry ------------------------------------------------------
+
+// Parse the inline content of a paragraph/heading/cell.
+//
+// Total: returns within finite time for any input, never panics.
+// Unmatched delimiters become literal text bytes.
+parse : String -> Array Inline;
+parse = |src| _scan(src, 0, src.get_size);
+
+// --- low-level byte predicates -----------------------------------------
+
+_is_alnum : U8 -> Bool;
+_is_alnum = |b| (
+    (b >= 'a' && b <= 'z') ||
+    (b >= 'A' && b <= 'Z') ||
+    (b >= '0' && b <= '9')
+);
+
+_is_url_terminator : U8 -> Bool;
+_is_url_terminator = |b| (
+    b == ' ' || b == '\t' || b == '\n' || b == '\r' ||
+    b == '<' || b == '>' || b == 34_U8 || b == ')'
+);
+
+// Trailing URL punctuation that GFM peels back off the matched URL.
+_is_trailing_punct : U8 -> Bool;
+_is_trailing_punct = |b| (
+    b == '.' || b == ',' || b == ';' || b == ':' ||
+    b == '!' || b == '?' || b == ')'
+);
+
+// --- byte/range helpers ------------------------------------------------
+
+_byte_at : Array U8 -> I64 -> I64 -> Option U8;
+_byte_at = |bytes, i, n| (
+    if i < 0 || i >= n { Option::none() } else { Option::some(bytes.@(i)) }
+);
+
+// Find the first occurrence of `target` in `bytes[start..end)`.
+_find_byte_in : Array U8 -> U8 -> I64 -> I64 -> Option I64;
+_find_byte_in = |bytes, target, start, end| (
+    loop(start, |i| (
+        if i >= end { break $ Option::none() };
+        if bytes.@(i) == target { break $ Option::some(i) };
+        continue $ i + 1
+    ))
+);
+
+// Find the first run of exactly two `target` bytes (not preceded or
+// followed by another `target`) in `bytes[start..end)`. Used for `**`/`__`/
+// `~~` close matching where we want to land on the next double-marker.
+_find_double_in : Array U8 -> U8 -> I64 -> I64 -> Option I64;
+_find_double_in = |bytes, target, start, end| (
+    loop(start, |i| (
+        if i + 1 >= end { break $ Option::none() };
+        if bytes.@(i) == target && bytes.@(i + 1) == target {
+            break $ Option::some(i)
+        };
+        continue $ i + 1
+    ))
+);
+
+// Find the first single `target` byte in `bytes[start..end)` that is NOT
+// part of a `target target` pair. Used to match the closing `*` of an
+// `emph` without accidentally consuming half of a `**` strong marker.
+_find_single_in : Array U8 -> U8 -> I64 -> I64 -> Option I64;
+_find_single_in = |bytes, target, start, end| (
+    loop(start, |i| (
+        if i >= end { break $ Option::none() };
+        if bytes.@(i) == target {
+            let prev_is = i > start && bytes.@(i - 1) == target;
+            let next_is = i + 1 < end && bytes.@(i + 1) == target;
+            if !prev_is && !next_is { break $ Option::some(i) };
+            // Skip past this run of `target`s.
+            continue $ i + 1
+        };
+        continue $ i + 1
+    ))
+);
+
+// Find the matching `close` for an opener at position `start - 1`,
+// counting balanced `open`/`close` pairs. Returns the index of the
+// matching close, or none if the input runs out.
+_find_balanced : Array U8 -> U8 -> U8 -> I64 -> I64 -> Option I64;
+_find_balanced = |bytes, open, close, start, end| (
+    loop((start, 1), |(i, depth)| (
+        if i >= end { break $ Option::none() };
+        let b = bytes.@(i);
+        if b == open { continue $ (i + 1, depth + 1) };
+        if b == close {
+            if depth == 1 { break $ Option::some(i) };
+            continue $ (i + 1, depth - 1)
+        };
+        continue $ (i + 1, depth)
+    ))
+);
+
+// --- scan core ---------------------------------------------------------
+
+// Append a text fragment `src[txt_start..i)` onto `acc` if non-empty.
+_flush : Array Inline -> String -> I64 -> I64 -> Array Inline;
+_flush = |acc, src, txt_start, i| (
+    if txt_start < i {
+        acc.push_back(Inline::text(src.get_sub(txt_start, i)))
+    } else {
+        acc
+    }
+);
+
+// Parse inlines from `src[start_pos..end_pos)`. The two-position form
+// lets callers limit recursion to a substring without copying.
+_scan : String -> I64 -> I64 -> Array Inline;
+_scan = |src, start_pos, end_pos| (
+    let bytes = src.get_bytes;
+    let (acc, txt_start) = loop((start_pos, [], start_pos), |(i, acc, txt_start)| (
+        if i >= end_pos { break $ (acc, txt_start) };
+        match _try_match(src, bytes, i, end_pos) {
+            some((inl, next_i)) => (
+                let acc = _flush(acc, src, txt_start, i);
+                let acc = acc.push_back(inl);
+                continue $ (next_i, acc, next_i)
+            ),
+            none() => continue $ (i + 1, acc, txt_start)
+        }
+    ));
+    _flush(acc, src, txt_start, end_pos)
+);
+
+// Dispatch on the byte at `bytes[i]`. Returns `some((inline, advance_to))`
+// when a delimiter matches, `none()` otherwise (caller treats the byte as
+// literal text and advances by 1).
+_try_match : String -> Array U8 -> I64 -> I64 -> Option (Inline, I64);
+_try_match = |src, bytes, i, n| (
+    let b = bytes.@(i);
+    if b == '`' { _try_code(src, bytes, i, n) }
+    else { if b == '*' { _try_star(src, bytes, i, n) }
+    else { if b == '_' { _try_underscore(src, bytes, i, n) }
+    else { if b == '~' { _try_tilde(src, bytes, i, n) }
+    else { if b == '!' { _try_image(src, bytes, i, n) }
+    else { if b == '[' { _try_link(src, bytes, i, n) }
+    else { if b == '<' { _try_angle(src, bytes, i, n) }
+    else { if b == 'h' || b == 'H' { _try_http_autolink(src, bytes, i, n) }
+    else { Option::none() } } } } } } } }
+);
+
+// --- code (verbatim, no inline parsing inside) -------------------------
+
+_try_code : String -> Array U8 -> I64 -> I64 -> Option (Inline, I64);
+_try_code = |src, bytes, i, n| (
+    match _find_byte_in(bytes, '`', i + 1, n) {
+        none() => Option::none(),
+        some(j) => (
+            let content = src.get_sub(i + 1, j);
+            Option::some((Inline::code(content), j + 1))
+        )
+    }
+);
+
+// --- * / ** ------------------------------------------------------------
+
+_try_star : String -> Array U8 -> I64 -> I64 -> Option (Inline, I64);
+_try_star = |src, bytes, i, n| (
+    let is_double = i + 1 < n && bytes.@(i + 1) == '*';
+    if is_double {
+        // **strong**
+        match _find_double_in(bytes, '*', i + 2, n) {
+            none() => Option::none(),
+            some(j) => (
+                let content = src.get_sub(i + 2, j);
+                Option::some((Inline::strong(parse(content)), j + 2))
+            )
+        }
+    } else {
+        // *emph*
+        match _find_single_in(bytes, '*', i + 1, n) {
+            none() => Option::none(),
+            some(j) => (
+                let content = src.get_sub(i + 1, j);
+                if content.is_empty { Option::none() }
+                else { Option::some((Inline::emph(parse(content)), j + 1)) }
+            )
+        }
+    }
+);
+
+// --- _ / __ (with inside-word rule) ------------------------------------
+
+// Returns true if `bytes[i]` is `_` and is inside a word (alnum on both
+// sides). Inside-word `_` is literal — GFM behavior.
+_underscore_inside_word : Array U8 -> I64 -> I64 -> Bool;
+_underscore_inside_word = |bytes, i, n| (
+    let prev = _byte_at(bytes, i - 1, n);
+    let next = _byte_at(bytes, i + 1, n);
+    let prev_alnum = match prev { some(b) => _is_alnum(b), none() => false };
+    let next_alnum = match next { some(b) => _is_alnum(b), none() => false };
+    prev_alnum && next_alnum
+);
+
+_try_underscore : String -> Array U8 -> I64 -> I64 -> Option (Inline, I64);
+_try_underscore = |src, bytes, i, n| (
+    if _underscore_inside_word(bytes, i, n) { Option::none() }
+    else {
+        let is_double = i + 1 < n && bytes.@(i + 1) == '_';
+        if is_double {
+            match _find_double_in(bytes, '_', i + 2, n) {
+                none() => Option::none(),
+                some(j) => (
+                    let content = src.get_sub(i + 2, j);
+                    Option::some((Inline::strong(parse(content)), j + 2))
+                )
+            }
+        } else {
+            match _find_single_in(bytes, '_', i + 1, n) {
+                none() => Option::none(),
+                some(j) => (
+                    let content = src.get_sub(i + 1, j);
+                    if content.is_empty { Option::none() }
+                    else { Option::some((Inline::emph(parse(content)), j + 1)) }
+                )
+            }
+        }
+    }
+);
+
+// --- ~~ strikethrough --------------------------------------------------
+
+_try_tilde : String -> Array U8 -> I64 -> I64 -> Option (Inline, I64);
+_try_tilde = |src, bytes, i, n| (
+    let is_double = i + 1 < n && bytes.@(i + 1) == '~';
+    if !is_double { Option::none() }
+    else {
+        match _find_double_in(bytes, '~', i + 2, n) {
+            none() => Option::none(),
+            some(j) => (
+                let content = src.get_sub(i + 2, j);
+                Option::some((Inline::strikethrough(parse(content)), j + 2))
+            )
+        }
+    }
+);
+
+// --- ![alt](url) image -------------------------------------------------
+
+_try_image : String -> Array U8 -> I64 -> I64 -> Option (Inline, I64);
+_try_image = |src, bytes, i, n| (
+    if i + 1 >= n || bytes.@(i + 1) != '[' { Option::none() }
+    else {
+        // [alt] must close before (url) opens.
+        match _find_balanced(bytes, '[', ']', i + 2, n) {
+            none() => Option::none(),
+            some(close_bracket) => (
+                if close_bracket + 1 >= n || bytes.@(close_bracket + 1) != '(' {
+                    Option::none()
+                } else {
+                    match _find_balanced(bytes, '(', ')', close_bracket + 2, n) {
+                        none() => Option::none(),
+                        some(close_paren) => (
+                            let alt = src.get_sub(i + 2, close_bracket);
+                            let url = src.get_sub(close_bracket + 2, close_paren);
+                            Option::some((
+                                Inline::image((alt, url)),
+                                close_paren + 1
+                            ))
+                        )
+                    }
+                }
+            )
+        }
+    }
+);
+
+// --- [text](url) link --------------------------------------------------
+
+_try_link : String -> Array U8 -> I64 -> I64 -> Option (Inline, I64);
+_try_link = |src, bytes, i, n| (
+    match _find_balanced(bytes, '[', ']', i + 1, n) {
+        none() => Option::none(),
+        some(close_bracket) => (
+            if close_bracket + 1 >= n || bytes.@(close_bracket + 1) != '(' {
+                Option::none()
+            } else {
+                match _find_balanced(bytes, '(', ')', close_bracket + 2, n) {
+                    none() => Option::none(),
+                    some(close_paren) => (
+                        let display_str = src.get_sub(i + 1, close_bracket);
+                        let url = src.get_sub(close_bracket + 2, close_paren);
+                        let display = parse(display_str);
+                        Option::some((
+                            Inline::link((display, url)),
+                            close_paren + 1
+                        ))
+                    )
+                }
+            }
+        )
+    }
+);
+
+// --- < ... > : autolink or raw_html ------------------------------------
+
+_try_angle : String -> Array U8 -> I64 -> I64 -> Option (Inline, I64);
+_try_angle = |src, bytes, i, n| (
+    match _find_byte_in(bytes, '>', i + 1, n) {
+        none() => Option::none(),
+        some(j) => (
+            let inner = src.get_sub(i + 1, j);
+            if inner.is_empty { Option::none() }
+            else {
+                let first = inner.get_first_byte.as_some;
+                // Autolink: inner contains "://"
+                if inner.find("://", 0).is_some {
+                    let display = [Inline::text(inner)];
+                    Option::some((Inline::link((display, inner)), j + 1))
+                }
+                // Raw HTML: starts with a letter (opening tag) or '/' (closing)
+                else { if _is_alnum(first) || first == '/' {
+                    let tag = src.get_sub(i, j + 1);
+                    Option::some((Inline::raw_html(tag), j + 1))
+                }
+                else { Option::none() } }
+            }
+        )
+    }
+);
+
+// --- bare http(s) autolink in text ------------------------------------
+
+// Returns the prefix length if `bytes[i..]` starts with one of the GFM
+// autolink schemes, else 0.
+_url_scheme_len : Array U8 -> I64 -> I64 -> I64;
+_url_scheme_len = |bytes, i, n| (
+    let starts = |s : String| (
+        let sb = s.get_bytes;
+        let sl = s.get_size;
+        if i + sl > n { false }
+        else {
+            loop(0, |k| (
+                if k >= sl { break $ true };
+                if bytes.@(i + k) != sb.@(k) { break $ false };
+                continue $ k + 1
+            ))
+        }
+    );
+    if starts("https://") { 8 }
+    else { if starts("http://") { 7 }
+    else { if starts("HTTPS://") { 8 }
+    else { if starts("HTTP://")  { 7 }
+    else { 0 } } } }
+);
+
+_try_http_autolink : String -> Array U8 -> I64 -> I64 -> Option (Inline, I64);
+_try_http_autolink = |src, bytes, i, n| (
+    let scheme = _url_scheme_len(bytes, i, n);
+    if scheme == 0 { Option::none() }
+    else {
+        // Scan until URL terminator.
+        let raw_end = loop(i + scheme, |k| (
+            if k >= n { break $ k };
+            if _is_url_terminator(bytes.@(k)) { break $ k };
+            continue $ k + 1
+        ));
+        // Peel back trailing punctuation.
+        let end = loop(raw_end, |k| (
+            if k <= i + scheme { break $ k };
+            if _is_trailing_punct(bytes.@(k - 1)) { continue $ k - 1 };
+            break $ k
+        ));
+        if end <= i + scheme { Option::none() }
+        else {
+            let url = src.get_sub(i, end);
+            Option::some((Inline::link(([Inline::text(url)], url)), end))
+        }
+    }
+);
+
+// --- scaffold marker (kept until every helper has its own ref) ---------
+
+scaffold_marker : ();
+scaffold_marker = ();

@@ -1,0 +1,38 @@
+// Top-level test harness for the Yaynu.Markdown library.
+//
+// Each per-capability suite lives in `tests/YaynuMarkdownTest/<Name>.fix`
+// and exposes `run : IO ()`. Wire them in by `import`-ing here and
+// chaining their `run` from `test`.
+module Test;
+
+import AstTest;
+import ParserInlineTest;
+import ParserBlockTest;
+import ParserTotalityTest;
+import RenderParagraphTest;
+import RenderBlockTest;
+import RenderListTest;
+import RenderTableTest;
+import RenderInlineTest;
+import WidgetTest;
+import SnapshotTest;
+import LinkEnumerationTest;
+import SelectedLinkTest;
+
+test : IO ();
+test = (
+    AstTest::run;;
+    ParserInlineTest::run;;
+    ParserBlockTest::run;;
+    ParserTotalityTest::run;;
+    RenderParagraphTest::run;;
+    RenderBlockTest::run;;
+    RenderListTest::run;;
+    RenderTableTest::run;;
+    RenderInlineTest::run;;
+    WidgetTest::run;;
+    SnapshotTest::run;;
+    LinkEnumerationTest::run;;
+    SelectedLinkTest::run;;
+    println("Yaynu.Markdown: tests passed")
+);

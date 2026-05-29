@@ -1,0 +1,96 @@
+// Public configuration types for the markdown renderer.
+//
+// Lives in its own sub-module so every internal helper
+// (`Render/Inline`, `Render/Block`, `Render/Table`) can depend on the
+// same `RenderOptions` / `TableBorderStyle` definitions without forming
+// an import cycle with `Yaynu.Markdown.Render` itself.
+//
+// Users normally import this transitively via `Yaynu.Markdown.Render`,
+// which `import`s this module to expose the names alongside the
+// top-level `render` / `render_string` / `estimate_height` functions.
+module Yaynu.Markdown.Render.Options;
+
+import Yaynu.Markdown.Style;
+import Yaynu.Tui.Style;
+
+// Border glyph set used by `Render/Table`.
+//
+// `none`  — no border glyphs; columns separated by spaces.
+// `light` — single-stroke Unicode box drawing (`┌─┐│└─┘├┼┤┬┴`).
+// `heavy` — heavy-stroke Unicode box drawing (`┏━┓┃┗━┛┣╋┫┳┻`).
+// `ascii` — ASCII fallback (`+-+|+-+`), for terminals without box-drawing
+//           font support.
+type TableBorderStyle = box union {
+    none  : (),
+    light : (),
+    heavy : (),
+    ascii : ()
+};
+
+// Everything the renderer needs beyond the document itself.
+//
+// All fields have v0.1 defaults provided by `RenderOptions::default`;
+// callers override individual fields with the auto-generated `.set_*`
+// helpers (e.g. `RenderOptions::default.set_wrap_code(true)`).
+type RenderOptions = box struct {
+    // Per-element palette consulted on every render.
+    style                    : MarkdownStyle,
+    // Whether to wrap paragraph content at the rect width.
+    wrap                     : Bool,
+    // Whether to character-wrap long code lines (`true`) or truncate
+    // them with `…` (`false`).
+    wrap_code                : Bool,
+    // Visual width of one indentation level for nested lists.
+    indent_unit              : I64,
+    // Glyph used in front of completed task-list items
+    // (substituted for the bullet).
+    task_done_marker         : String,
+    // Glyph used in front of pending task-list items.
+    task_pending_marker      : String,
+    // Bullet glyphs used at successive nesting levels of an unordered
+    // list (`bullet_markers[level mod len]`).
+    bullet_markers           : Array String,
+    // Whether to draw a single-line box around fenced code blocks.
+    code_block_border        : Bool,
+    // Whether to render the code-block language string above (or
+    // inside the border of) a fenced code block.
+    show_code_block_language : Bool,
+    // Single character (grapheme cluster) repeated to fill the row
+    // for a thematic break.
+    thematic_break_char      : String,
+    // Border style applied to tables.
+    table_border             : TableBorderStyle,
+    // Source-DFS index (see `Yaynu.Markdown.Ast::collect_links`) of the
+    // link to highlight on this render. `none` = nothing selected.
+    // Out-of-range indices degrade to `none` (no highlight, no panic).
+    selected_link            : Option I64,
+    // Style overlaid onto the per-link palette style (`MarkdownStyle.@link`)
+    // for the cells of the selected link's display content. Defaults to
+    // reverse video so it's visible on top of any link palette.
+    selected_link_style      : Style
+};
+
+namespace RenderOptions {
+
+    // Sensible defaults: wrap paragraphs, truncate (rather than wrap)
+    // long code lines, indent 2 columns per list level, use the
+    // common bullet rotation `• ◦ ▪`, draw a bordered code block with
+    // the language label, render thematic breaks as a horizontal line,
+    // and draw tables with light box-drawing glyphs.
+    default : RenderOptions;
+    default = RenderOptions {
+        style                    : MarkdownStyle::default,
+        wrap                     : true,
+        wrap_code                : false,
+        indent_unit              : 2,
+        task_done_marker         : "[x]",
+        task_pending_marker      : "[ ]",
+        bullet_markers           : ["•", "◦", "▪"],
+        code_block_border        : true,
+        show_code_block_language : true,
+        thematic_break_char      : "─",
+        table_border             : TableBorderStyle::light(),
+        selected_link            : Option::none(),
+        selected_link_style      : Style::default.set_reverse(true)
+    };
+}

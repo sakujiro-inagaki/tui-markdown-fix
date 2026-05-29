@@ -1,0 +1,340 @@
+// show.fix — minimal markdown pager with visibility-aware link
+// navigation.
+//
+// Usage:
+//   fix run -f examples/show.fix \
+//     -s tui_shim -s term_shim \
+//     -L .fixlang/deps/tui_0.1.2/c_src \
+//     -L .fixlang/deps/term_0.1.0/c_src \
+//     -- <file.md>
+//
+// Keys:
+//   - ↑/↓ / j / k                 — scroll one row
+//   - PgUp / PgDn / Space         — page up/down (Space only when no
+//                                   link is selected)
+//   - g / Home / G / End          — top / bottom
+//   - Tab / Shift+Tab             — cycle forward / backward through
+//                                   the links *currently visible* in
+//                                   the viewport (Shift+Tab requires
+//                                   tui-fix ≥ 0.2.0 / term-fix ≥ 0.2.0
+//                                   which report it as `Key::back_tab`)
+//   - Space (when link selected)  — open the selected link in the
+//                                   default browser (`open` on macOS,
+//                                   `xdg-open` on Linux/BSD)
+//   - q / Q / Esc                 — quit
+//
+// Notes:
+//   - The currently-selected link is rendered with reverse video.
+//   - Initial state has no link selected.
+//   - Scrolling deselects automatically when the selected link
+//     scrolls off-screen.
+//   - Esc is not bound to quit on purpose: tui-fix 0.1.2 reports any
+//     unrecognised CSI sequence (including Shift+Tab → `ESC[Z`) as a
+//     bare `Key::escape`, so quitting on Esc would close the app when
+//     the user presses Shift+Tab. Use `q` to quit.
+module Main;
+
+import Yaynu.Markdown;
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Widget;
+import Yaynu.Tui;
+import Yaynu.Tui.Event;
+import Yaynu.Tui.Frame;
+import Yaynu.Tui.Rect;
+import Yaynu.Tui.Style;
+import Yaynu.Term.Key;
+import Yaynu.Term.Size;
+
+type AppState = box struct {
+    view              : MarkdownView,
+    selected          : Option I64,
+    // Precomputed once at startup and refreshed on resize. Holds every
+    // link in source-DFS order plus the row range of its containing
+    // block at the current viewport width (block-granular).
+    link_block_rows   : Array (LinkInfo, I64, I64),
+    last_opened_url   : Option String,
+    // Hidden bookkeeping: holds the last `system(3)` exit code from
+    // `_open_url`. Stored only so the compiler cannot dead-code-
+    // -eliminate the FFI call (which it treats as pure). Not displayed.
+    _last_open_exit  : I64
+};
+
+// Shell-escape a string for single-quoted inclusion (`'foo'`-style).
+// Within single quotes the only special char is `'`, which terminates
+// the quote; the standard escape is `'\''` (close, literal apostrophe,
+// reopen).
+_sq_escape : String -> String;
+_sq_escape = |s| (
+    let bs = s.get_bytes;
+    let raw = bs.get_size;
+    let n = if raw > 0 && bs.@(raw - 1) == 0_U8 { raw - 1 } else { raw };
+    loop(("", 0), |(acc, i)| (
+        if i >= n { break $ acc };
+        let b = bs.@(i);
+        let chunk = if b == 39_U8 /* ' */ {
+            "'\\''"
+        } else {
+            String::_unsafe_from_c_str([b, 0_U8])
+        };
+        continue $ (acc + chunk, i + 1)
+    ))
+);
+
+// Open `url` in the platform's default browser by shelling out to
+// `open` (macOS) or `xdg-open` (Linux/BSD), backgrounded so the call
+// returns immediately. The result is the `system(3)` exit code; the
+// caller MUST thread it into state to prevent the optimizer from
+// eliding the FFI call (Fix treats `FFI_CALL` as pure and will DCE
+// the call if the result is unused).
+_open_url : String -> I64;
+_open_url = |url| (
+    let safe = _sq_escape(url);
+    let cmd =
+        "(command -v open >/dev/null 2>&1 && open '" + safe + "' || "
+        + "command -v xdg-open >/dev/null 2>&1 && xdg-open '" + safe + "') "
+        + ">/dev/null 2>&1 &";
+    let rc = cmd.borrow_c_str(|ptr| FFI_CALL[CInt system(Ptr), ptr]);
+    rc.to_I64
+);
+
+// Layout: top row is the status line (help text or "opened: <url>"),
+// the rest is the markdown body.
+_body_rect : Rect -> Rect;
+_body_rect = |r| (
+    Rect::make(r.@x, r.@y + 1, r.@width,
+                if r.@height > 1 { r.@height - 1 } else { 0 })
+);
+
+// True iff a link with block range `[rs, re]` overlaps the viewport
+// `[view_start, view_start + body_h - 1]`. Empty body height means
+// nothing is visible.
+_link_overlaps_viewport : I64 -> I64 -> I64 -> I64 -> Bool;
+_link_overlaps_viewport = |rs, re, view_start, body_h| (
+    if body_h <= 0 { false } else {
+        let view_end = view_start + body_h - 1;
+        rs <= view_end && re >= view_start
+    }
+);
+
+// Indices (in `collect_links` order) of every link currently inside
+// the viewport, in source-DFS order.
+_visible_link_indices : I64 -> I64 -> Array (LinkInfo, I64, I64) -> Array I64;
+_visible_link_indices = |scroll, body_h, link_rows| (
+    link_rows.to_iter.fold([], |(li, rs, re), acc| (
+        if _link_overlaps_viewport(rs, re, scroll, body_h) {
+            acc.push_back(li.@index)
+        } else { acc }
+    ))
+);
+
+// Look up the URL of the link with `index = idx` (linear scan; link
+// counts here are typically tiny).
+_url_of : I64 -> Array (LinkInfo, I64, I64) -> Option String;
+_url_of = |idx, link_rows| (
+    link_rows.to_iter.fold(Option::none(), |(li, _rs, _re), acc| (
+        match acc {
+            some(_) => acc,
+            none()  => if li.@index == idx { Option::some(li.@url) } else { Option::none() }
+        }
+    ))
+);
+
+// Position of `target` in `visible` (-1 if absent).
+_pos_in : I64 -> Array I64 -> I64;
+_pos_in = |target, visible| (
+    let n = visible.get_size;
+    loop(0, |i| (
+        if i >= n { break $ -1 };
+        if visible.@(i) == target { break $ i };
+        continue $ i + 1
+    ))
+);
+
+// Move `selected` along the list of visible link indices by `dir`
+// (`+1` forward, `-1` backward), wrapping. If `selected = none`,
+// jumps to the first / last visible link depending on direction.
+// If no links are visible, leaves `selected` unchanged at `none`.
+_cycle_selected : I64 -> AppState -> AppState;
+_cycle_selected = |dir, s| (
+    let (_w, h) = s.@view.@last_rect;
+    let scroll = s.@view.@scroll;
+    let visible = _visible_link_indices(scroll, h, s.@link_block_rows);
+    let nv = visible.get_size;
+    if nv <= 0 { s.set_selected(Option::none()) }
+    else {
+        let next_idx = match s.@selected {
+            none() => if dir >= 0 { visible.@(0) } else { visible.@(nv - 1) },
+            some(cur) => (
+                let pos = _pos_in(cur, visible);
+                if pos < 0 {
+                    if dir >= 0 { visible.@(0) } else { visible.@(nv - 1) }
+                } else {
+                    let raw = (pos + dir) % nv;
+                    let wrapped = if raw < 0 { raw + nv } else { raw };
+                    visible.@(wrapped)
+                }
+            )
+        };
+        s.set_selected(Option::some(next_idx))
+    }
+);
+
+// If a selected link has scrolled out of the viewport, drop the
+// selection. Idempotent.
+_reconcile_selection : AppState -> AppState;
+_reconcile_selection = |s| (
+    match s.@selected {
+        none() => s,
+        some(idx) => (
+            let (_w, h) = s.@view.@last_rect;
+            let scroll = s.@view.@scroll;
+            let visible = _visible_link_indices(scroll, h, s.@link_block_rows);
+            let still = _pos_in(idx, visible) >= 0;
+            if still { s } else { s.set_selected(Option::none()) }
+        )
+    }
+);
+
+impl AppState : TuiApp {
+    initial = AppState {
+        view              : MarkdownView::new("loading..."),
+        selected          : Option::none(),
+        link_block_rows   : [],
+        last_opened_url   : Option::none(),
+        _last_open_exit   : 0
+    };
+    view = |s, frame| (
+        let r = frame.@size;
+        let help_rect = Rect::make(r.@x, r.@y, r.@width, 1);
+        let body_rect = _body_rect(r);
+        let visible = _visible_link_indices(s.@view.@scroll, body_rect.@height,
+                                             s.@link_block_rows);
+        let n_visible = visible.get_size;
+        let base_help = if n_visible == 0 {
+            "↑/↓/j/k scroll · PgUp/PgDn/Space page · g/G top/end · q/Esc quit"
+        } else {
+            match s.@selected {
+                none()  => "↑/↓/j/k scroll · Tab select link · g/G top/end · q/Esc quit",
+                some(_) => "Tab/⇧Tab next/prev · Space open in browser · ↑/↓ scroll · q/Esc quit"
+            }
+        };
+        let help_text = match s.@last_opened_url {
+            some(url) => "opened in browser: " + url,
+            none()    => base_help
+        };
+        let frame2 = frame.render_text(help_text, Style::default.set_dim(true), help_rect);
+        let opts = s.@view.@options.set_selected_link(s.@selected);
+        let view2 = s.@view.set_options(opts);
+        frame2.render_markdown_view(view2, body_rect)
+    );
+    update = |ev, s| (
+        match ev {
+            key(k) => (
+                match k {
+                    escape()   => UpdateResult::quit(),
+                    tab()      => UpdateResult::continue $ _cycle_selected(1, s),
+                    back_tab() => UpdateResult::continue $ _cycle_selected(-1, s),
+                    char(c) => (
+                        if c == "q" || c == "Q" { UpdateResult::quit() }
+                        else if c == " " {
+                            // Space opens the selected link in the
+                            // default browser; falls back to PageDown
+                            // when no link is selected.
+                            match s.@selected {
+                                some(idx) => (
+                                    let url = match _url_of(idx, s.@link_block_rows) {
+                                        some(u) => u,
+                                        none()  => ""
+                                    };
+                                    if url == "" { UpdateResult::continue(s) }
+                                    else {
+                                        // Shell out via `open` / `xdg-open`. The
+                                        // exit code is threaded into state so the
+                                        // compiler must keep the FFI call.
+                                        let rc = _open_url(url);
+                                        let s2 = s.set_last_opened_url(Option::some(url))
+                                                  .set__last_open_exit(rc);
+                                        UpdateResult::continue(s2)
+                                    }
+                                ),
+                                none() => (
+                                    let s2 = s.mod_view(|v| handle_key(k, v));
+                                    UpdateResult::continue $ _reconcile_selection(s2)
+                                )
+                            }
+                        }
+                        else {
+                            let s2 = s.mod_view(|v| handle_key(k, v));
+                            UpdateResult::continue $ _reconcile_selection(s2)
+                        }
+                    ),
+                    _ => (
+                        let s2 = s.mod_view(|v| handle_key(k, v));
+                        UpdateResult::continue $ _reconcile_selection(s2)
+                    )
+                }
+            ),
+            resize((rows, cols)) => (
+                let term_rect = Rect::make(0, 0, cols, rows);
+                let body = _body_rect(term_rect);
+                let v2 = s.@view.remember_rect(body);
+                // Recompute block rows at the new viewport width.
+                let rows_new = Render::link_block_rows(v2.@document, v2.@options,
+                                                        body.@width);
+                let s2 = s.set_view(v2).set_link_block_rows(rows_new);
+                UpdateResult::continue $ _reconcile_selection(s2)
+            ),
+            _ => UpdateResult::continue(s)
+        }
+    );
+    tick_rate = |_| Option::none();
+}
+
+_read_file_or_die : String -> IO String;
+_read_file_or_die = |path| (
+    read_file_string(path).try(|err| (
+        eprintln("show: cannot read " + path + ": " + err);;
+        pure $ "# Cannot read file\n\nPath: `" + path + "`\n\nError: " + err
+    ))
+);
+
+main : IO ();
+main = (
+    let args = *get_args;
+    let n = args.get_size;
+    let path = if n >= 2 { args.@(1) } else { "" };
+    if path == "" {
+        println("usage: fix run -f examples/show.fix -- <file.md>")
+    } else {
+        let src = *_read_file_or_die(path);
+        let view0 = MarkdownView::new(src);
+        // Seed `last_rect` from the current terminal size so the
+        // initial visibility check has accurate viewport dimensions —
+        // tui-fix only emits `resize` on SIGWINCH, not at startup.
+        let sz_res = *Yaynu.Term.Size::TermSize::get.to_result;
+        let (initial_view, body_rect) = match sz_res {
+            ok(sz) => (
+                let term_rect = Rect::make(0, 0, sz.@cols, sz.@rows);
+                let body = _body_rect(term_rect);
+                (view0.remember_rect(body), body)
+            ),
+            err(_) => (view0, Rect::make(0, 0, 0, 0))
+        };
+        let initial_link_rows = Render::link_block_rows(
+            initial_view.@document, initial_view.@options, body_rect.@width);
+        let initial_state : AppState = AppState {
+            view              : initial_view,
+            selected          : Option::none(),
+            link_block_rows   : initial_link_rows,
+            last_opened_url   : Option::none(),
+            _last_open_exit   : 0
+        };
+        let r = *Yaynu.Tui::run(initial_state).to_result;
+        match r {
+            ok(_)  => println("bye"),
+            err(e) => println("error: " + e)
+        }
+    }
+);

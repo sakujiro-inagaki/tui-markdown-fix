@@ -1,0 +1,290 @@
+// Inline-flattening helpers shared by the block renderer.
+//
+// The renderer is two-pass: first turn `Array Inline` into a flat
+// sequence of `InlineToken`s with styles already overlaid, then a
+// generic wrapper turns those tokens into wrapped `RenderedLine`s for
+// the destination rect width. This module is the first pass.
+//
+// Style composition rule (spec: "Inline styles SHALL be composed with
+// the surrounding block's base style by overlay"): for booleans we OR
+// (set-wins), for `Option Color` the child wins when it carries
+// `Some`. This is implemented in `overlay`.
+module Yaynu.Markdown.Render.Inline;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Style;
+import Yaynu.Tui.Style;
+import Yaynu.Tui.Width;
+
+// One atomic unit of inline text for the line wrapper.
+//
+// `word`       — non-empty run of non-whitespace characters with its
+//                composed style. Indivisible at whitespace boundaries
+//                but the wrapper character-breaks it if it overflows
+//                the row width on its own.
+// `space`      — a single soft-space boundary, carrying the style of
+//                the surrounding inline (so e.g. a link's underline
+//                spans the space between two of its words). The
+//                wrapper renders it as one space, drops it at row
+//                start, and merges consecutive spaces (keeping the
+//                most recent style, which is the one adjacent to the
+//                next word).
+// `hard_break` — forces the wrapper to flush and start a new row.
+type InlineToken = box union {
+    word       : (String, Style),
+    space      : Style,
+    hard_break : ()
+};
+
+// Compose two styles: every attribute the child sets ("true" boolean
+// or `Some` colour) overrides the base; otherwise the base wins.
+// Used to apply per-inline accents on top of the surrounding block's
+// base style.
+overlay : Style -> Style -> Style;
+overlay = |base, child| (
+    Style {
+        fg        : (match child.@fg { some(c) => some(c), none() => base.@fg }),
+        bg        : (match child.@bg { some(c) => some(c), none() => base.@bg }),
+        bold      : base.@bold      || child.@bold,
+        underline : base.@underline || child.@underline,
+        italic    : base.@italic    || child.@italic,
+        reverse   : base.@reverse   || child.@reverse,
+        dim       : base.@dim       || child.@dim
+    }
+);
+
+// Flatten an `Array Inline` to wrap-ready tokens. The base `Style` is
+// the surrounding block's style; the palette and selected-link state
+// come from `RenderOptions`. `start_idx` is the current value of the
+// global link counter; the function returns the counter after every
+// `link` in `xs` (and any nested inside container inlines) has been
+// consumed.
+//
+// Tokenization rules:
+// - `text`           — split at runs of ASCII whitespace; each run
+//                      becomes a single `space` token; non-whitespace
+//                      runs become `word` tokens with the base style.
+// - `code`           — single `word` (verbatim) with `inline_code`
+//                      style. Never split at internal whitespace.
+// - `emph` / `strong` / `strikethrough` — recurse with the appropriate
+//   overlay applied; counter passes through unchanged.
+// - `link`           — consume one counter value (the link's own
+//                      source-DFS index), then recurse into `kids`
+//                      with `link` style overlaid. If the consumed
+//                      index equals `opts.@selected_link`, also
+//                      overlay `opts.@selected_link_style`.
+// - `image (alt, _)` — single `word` `"[image: <alt>]"` with `image`
+//                      style.
+// - `raw_html`       — single `word` (verbatim) with base style.
+// - `line_break`     — single `hard_break` token.
+inlines_to_tokens : Array Inline -> Style -> RenderOptions -> I64 -> (Array InlineToken, I64);
+inlines_to_tokens = |xs, base, opts, start_idx| (
+    xs.to_iter.fold(([], start_idx), |x, (acc, idx)| (
+        let (toks, next_idx) = _inline_to_tokens(x, base, opts, idx);
+        (acc.append(toks), next_idx)
+    ))
+);
+
+_inline_to_tokens : Inline -> Style -> RenderOptions -> I64 -> (Array InlineToken, I64);
+_inline_to_tokens = |i, base, opts, idx| (
+    let palette = opts.@style;
+    match i {
+        text(s)             => (_tokenize_text(s, base), idx),
+        emph(kids)          => inlines_to_tokens(kids, overlay(base, palette.@emph), opts, idx),
+        strong(kids)        => inlines_to_tokens(kids, overlay(base, palette.@strong), opts, idx),
+        strikethrough(kids) => inlines_to_tokens(kids, overlay(base, palette.@strikethrough), opts, idx),
+        code(s)             => ([InlineToken::word((s, overlay(base, palette.@inline_code)))], idx),
+        link((kids, _url))  => (
+            // The link's own source-DFS index is the counter's current
+            // value; nested links inside `kids` consume idx+1, idx+2, …
+            let this_idx = idx;
+            let link_base = overlay(base, palette.@link);
+            let kids_base = match opts.@selected_link {
+                some(sel) => if sel == this_idx {
+                    overlay(link_base, opts.@selected_link_style)
+                } else { link_base },
+                none() => link_base
+            };
+            inlines_to_tokens(kids, kids_base, opts, idx + 1)
+        ),
+        image((alt, _url))  => ([InlineToken::word(("[image: " + alt + "]", overlay(base, palette.@image)))], idx),
+        line_break()        => ([InlineToken::hard_break()], idx),
+        raw_html(s)         => ([InlineToken::word((s, base))], idx)
+    }
+);
+
+// Tokenize a literal text run at ASCII whitespace boundaries. Runs of
+// `\t` `\n` `\r` and ` ` collapse to a single `space` token; the
+// result has no leading or trailing `space` if the input does (the
+// wrapper would drop them anyway, but trimming up front keeps the
+// token stream clean for assertions).
+_tokenize_text : String -> Style -> Array InlineToken;
+_tokenize_text = |s, base| (
+    let bytes = s.get_bytes;
+    let n = if bytes.get_size > 0 && bytes.@(bytes.get_size - 1) == 0_U8 {
+        bytes.get_size - 1
+    } else {
+        bytes.get_size
+    };
+    // Emit boundary `space` tokens verbatim — the wrap pass drops
+    // them at row starts and collapses runs. Stripping leading /
+    // trailing spaces here loses the space between adjacent inline
+    // segments (e.g. `text "a "`, `emph "b"`, `text " c"` would
+    // render as `a bc` if we trimmed).
+    let init : (Array InlineToken, Array U8, Bool, I64) = ([], [], false, 0);
+    let (tokens, current, in_word, _) = loop(init, |(toks, cur, in_w, i)| (
+        if i >= n { break $ (toks, cur, in_w, i) };
+        let b = bytes.@(i);
+        let is_ws = b == ' ' || b == '\t' || b == '\n' || b == '\r';
+        if is_ws {
+            let toks2 = if in_w {
+                let w = _bytes_to_string(cur);
+                toks.push_back(InlineToken::word((w, base)))
+            } else { toks };
+            // Collapse adjacent whitespace into a single `space`
+            // token. The wrapper drops the run at row start. The
+            // style attached to the space mirrors this inline's
+            // base style so e.g. a link's underline carries across
+            // its internal spaces. When a previous space token
+            // exists, overwrite it: the later style wins (it's the
+            // one adjacent to the next word in source order).
+            let toks3 = (
+                let m = toks2.get_size;
+                if m > 0 {
+                    let last = toks2.@(m - 1);
+                    let is_space = match last { space(_) => true, _ => false };
+                    if is_space {
+                        Array::from_map(m, |k| (
+                            if k == m - 1 { InlineToken::space(base) } else { toks2.@(k) }
+                        ))
+                    } else { toks2.push_back(InlineToken::space(base)) }
+                } else { toks2.push_back(InlineToken::space(base)) }
+            );
+            continue $ (toks3, [], false, i + 1)
+        } else {
+            continue $ (toks, cur.push_back(b), true, i + 1)
+        }
+    ));
+    // Flush trailing word. A trailing `space` is preserved so the
+    // next sibling inline gets its boundary back.
+    if in_word {
+        tokens.push_back(InlineToken::word((_bytes_to_string(current), base)))
+    } else { tokens }
+);
+
+// Build a String from a byte buffer (already stripped of any trailing
+// NUL by `_tokenize_text`).
+_bytes_to_string : Array U8 -> String;
+_bytes_to_string = |bs| String::_unsafe_from_c_str(bs.push_back(0_U8));
+
+// ----------------------------------------------------------------------
+// Line wrapping. Operates on the flat token stream produced above.
+
+// A single rendered row: a sequence of styled text fragments. The
+// wrapper guarantees each line's total visible width is `<= width`
+// when `width > 0`. Empty `RenderedLine`s denote blank rows.
+//
+// `RenderedLine` is intentionally a tuple-of-arrays alias rather than
+// a named type — it's just data passed between layers, and `Array
+// (String, Style)` is the natural shape for `Buffer::set_string`.
+//
+// Wrapping rules (mirrors the markdown-render spec):
+// - Greedy fill at whitespace.
+// - A word wider than the row falls back to a character break.
+// - `space` tokens at row start are dropped.
+// - `hard_break` flushes the current row immediately.
+wrap_tokens : I64 -> Array InlineToken -> Array (Array (String, Style));
+wrap_tokens = |width, toks| (
+    if width <= 0 { [] };
+    let n = toks.get_size;
+    // State: (lines, cur, used, pending_sp_style)
+    // `pending_sp_style` is `none` when no space is pending,
+    // `some(style)` otherwise. The style is what will be applied
+    // when the space is emitted just before the next word.
+    let init : (Array (Array (String, Style)), Array (String, Style), I64, Option Style) =
+        ([], [], 0, Option::none());
+    let (lines, cur, _used, _pending) = loop((init, 0), |((lines, cur, used, pending_sp), i)| (
+        if i >= n { break $ (lines, cur, used, pending_sp) };
+        let t = toks.@(i);
+        match t {
+            hard_break() => (
+                continue $ ((lines.push_back(cur), [], 0, Option::none()), i + 1)
+            ),
+            space(sty) => (
+                // Drop spaces at row start; otherwise queue the
+                // style for emission alongside the next word.
+                if used == 0 {
+                    continue $ ((lines, cur, used, Option::none()), i + 1)
+                } else {
+                    continue $ ((lines, cur, used, Option::some(sty)), i + 1)
+                }
+            ),
+            word((text, style)) => (
+                let w = Width::string_width(text);
+                let extra = match pending_sp { some(_) => 1, none() => 0 };
+                if used + extra + w <= width {
+                    // Fits on current row.
+                    let cur2 = match pending_sp {
+                        some(sp_sty) => cur.push_back((" ", sp_sty)),
+                        none()       => cur
+                    };
+                    let cur3 = cur2.push_back((text, style));
+                    continue $ ((lines, cur3, used + extra + w, Option::none()), i + 1)
+                } else {
+                    // Flush current row first (if any content).
+                    let (lines2, cur2, used2) = if used == 0 {
+                        (lines, cur, used)
+                    } else {
+                        (lines.push_back(cur), [], 0)
+                    };
+                    if w <= width {
+                        // Fits alone on a fresh row.
+                        let cur3 = cur2.push_back((text, style));
+                        continue $ ((lines2, cur3, w, Option::none()), i + 1)
+                    } else {
+                        // Character-break the token across rows.
+                        let (lines3, cur3, used3) = _char_break(text, style, width, lines2, cur2, used2);
+                        continue $ ((lines3, cur3, used3, Option::none()), i + 1)
+                    }
+                }
+            )
+        }
+    ));
+    // Flush trailing line if non-empty.
+    if cur.get_size > 0 { lines.push_back(cur) } else { lines }
+);
+
+// Split a string into character-wrap chunks of at most `width`
+// columns each, flushing into `lines`.
+_char_break : String -> Style -> I64 -> Array (Array (String, Style)) -> Array (String, Style) -> I64
+              -> (Array (Array (String, Style)), Array (String, Style), I64);
+_char_break = |text, style, width, lines, cur, used| (
+    let clusters = Width::iter_graphemes(text).to_array;
+    let m = clusters.get_size;
+    loop((lines, cur, used, "", 0, 0), |(ls, cu, u, buf, buf_w, j)| (
+        if j >= m {
+            // Flush the trailing partial chunk into cur.
+            if buf_w == 0 {
+                break $ (ls, cu, u)
+            } else {
+                break $ (ls, cu.push_back((buf, style)), u + buf_w)
+            }
+        };
+        let g = clusters.@(j);
+        let cw = g.@width;
+        // If the cluster doesn't even fit on a full empty row, skip
+        // it (defensive — should be unreachable for width >= 2).
+        if cw > width { continue $ (ls, cu, u, buf, buf_w, j + 1) };
+        if u + buf_w + cw > width {
+            // Flush current buffered chunk + cur as a complete row.
+            let cur2 = if buf_w == 0 { cu } else { cu.push_back((buf, style)) };
+            // Push as a finished line.
+            let ls2 = ls.push_back(cur2);
+            // Start new row with this cluster.
+            continue $ (ls2, [], 0, g.@text, cw, j + 1)
+        } else {
+            continue $ (ls, cu, u, buf + g.@text, buf_w + cw, j + 1)
+        }
+    ))
+);

@@ -1,0 +1,25 @@
+# Project Status
+
+Here is a *brief summary* of the current state.
+
+## Todo
+
+- Write more **tests**
+- Document the API
+- Ship v0.1
+
+## Snippet
+
+```python
+def add(a, b):
+    return a + b
+```
+
+## Numbers
+
+| Metric  | Value |
+|---------|-------|
+| Tests   |    42 |
+| Files   |    13 |
+
+See the [docs](https://example.com/docs) for details.

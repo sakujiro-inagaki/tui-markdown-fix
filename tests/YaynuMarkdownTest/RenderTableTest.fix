@@ -1,0 +1,99 @@
+// Table rendering tests.
+// Covers the scenarios in specs/markdown-render/spec.md under
+// "Table rendering with width allocation".
+module RenderTableTest;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser;
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Style;
+import Yaynu.Markdown.Test;
+import Yaynu.Tui.Buffer;
+import Yaynu.Tui.Rect;
+
+_strip_trailing : String -> String;
+_strip_trailing = |s| (
+    let lines = s.split("\n").map(|line| (
+        let bs = line.get_bytes;
+        let raw = bs.get_size;
+        let nz = if raw > 0 && bs.@(raw - 1) == 0_U8 { raw - 1 } else { raw };
+        let len = loop(nz, |i| (
+            if i <= 0 { break $ 0 };
+            if bs.@(i - 1) == ' ' { continue $ i - 1 };
+            break $ i
+        ));
+        line.get_sub(0, len)
+    )).to_array;
+    let m = lines.get_size;
+    let last = loop(m, |i| (
+        if i <= 0 { break $ 0 };
+        if lines.@(i - 1) == "" { continue $ i - 1 };
+        break $ i
+    ));
+    Array::from_map(last, |i| lines.@(i)).to_iter.join("\n")
+);
+
+_render : RenderOptions -> String -> I64 -> I64 -> String;
+_render = |opts, src, w, h| _strip_trailing(Test::render_to_string(src, opts, w, h));
+
+_simple_table : String;
+_simple_table = "| a | b |\n|---|---|\n| 1 | 2 |";
+
+run_light_border_glyphs : IO ();
+run_light_border_glyphs = (
+    let opts = RenderOptions::default.set_table_border(TableBorderStyle::light());
+    let out = _render(opts, _simple_table, 20, 5);
+    let any_glyph = out.find("┌", 0).is_some
+                 || out.find("┐", 0).is_some
+                 || out.find("└", 0).is_some
+                 || out.find("┘", 0).is_some
+                 || out.find("│", 0).is_some
+                 || out.find("┼", 0).is_some
+                 || out.find("─", 0).is_some;
+    assert_eq(|_| "light border draws box-drawing glyphs", any_glyph, true)
+);
+
+run_ascii_border : IO ();
+run_ascii_border = (
+    let opts = RenderOptions::default.set_table_border(TableBorderStyle::ascii());
+    let out = _render(opts, _simple_table, 20, 5);
+    let has_plus = out.find("+", 0).is_some;
+    let has_dash = out.find("-", 0).is_some;
+    let has_pipe = out.find("|", 0).is_some;
+    assert_eq(|_| "ascii border uses + - |",
+        has_plus && has_dash && has_pipe, true)
+);
+
+run_none_border : IO ();
+run_none_border = (
+    let opts = RenderOptions::default.set_table_border(TableBorderStyle::none());
+    let out = _render(opts, _simple_table, 20, 3);
+    let no_box = out.find("┌", 0).is_none
+              && out.find("┐", 0).is_none
+              && out.find("│", 0).is_none;
+    assert_eq(|_| "none border has no box-drawing glyphs", no_box, true);;
+    // The header should still appear.
+    let has_a = out.find("a", 0).is_some;
+    let has_b = out.find("b", 0).is_some;
+    assert_eq(|_| "header content present without border", has_a && has_b, true)
+);
+
+run_truncation : IO ();
+run_truncation = (
+    // Narrow rect forces truncation in cells.
+    let opts = RenderOptions::default.set_table_border(TableBorderStyle::none());
+    let src = "| veryverylongheader | b |\n|---|---|\n| 1 | 2 |";
+    let out = _render(opts, src, 12, 3);
+    let has_ellipsis = out.find("…", 0).is_some;
+    assert_eq(|_| "cell that doesn't fit ends with …", has_ellipsis, true)
+);
+
+run : IO ();
+run = (
+    run_light_border_glyphs;;
+    run_ascii_border;;
+    run_none_border;;
+    run_truncation;;
+    println("RenderTableTest: table rendering OK")
+);

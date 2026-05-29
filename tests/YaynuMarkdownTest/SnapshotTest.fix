@@ -1,0 +1,146 @@
+// Snapshot test harness.
+//
+// For each known fixture under `tests/fixtures/snapshots/`, parse the
+// `<name>.md` source, render it into a fixed-size buffer, dump the
+// buffer with `Yaynu.Markdown.Test::buffer_debug_string`, and compare
+// to `<name>.expected.txt`. The fixture list is hard-coded (Std has
+// no directory enumeration); to add a new fixture, append its name
+// here and create the two files on disk.
+//
+// On mismatch the test prints a unified-diff-style line-by-line
+// comparison and the suite fails on the first divergent fixture.
+//
+// If the expected file is missing (a useful state when bootstrapping
+// a new fixture), the harness writes the *actual* output to disk as
+// the expected baseline and continues — the next run will then diff
+// against it. Hand-inspect the generated file before committing.
+module SnapshotTest;
+
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Test;
+
+// Fixture name (no extension) and the buffer dimensions to render at.
+//
+// Snapshot fixtures live in `tests/fixtures/snapshots/`. Each has an
+// accompanying `<name>.expected.txt` produced (then hand-checked) by
+// running `_render_for_fixture` once and saving the output. To
+// regenerate after an intentional renderer change, use
+// `examples/snapshot_dump.fix` (not currently checked in — re-render
+// manually for now).
+type Fixture = box struct {
+    name   : String,
+    width  : I64,
+    height : I64
+};
+
+_fixtures : Array Fixture;
+_fixtures = [
+    Fixture { name : "simple",       width : 30, height : 6 },
+    Fixture { name : "code_block",   width : 40, height : 8 },
+    Fixture { name : "table",        width : 30, height : 6 },
+    Fixture { name : "nested_list",  width : 30, height : 8 },
+    Fixture { name : "japanese",     width : 30, height : 4 },
+    Fixture { name : "llm_response", width : 60, height : 24 }
+];
+
+_fixture_dir : String;
+_fixture_dir = "tests/fixtures/snapshots/";
+
+_render_for_fixture : Fixture -> String -> String;
+_render_for_fixture = |f, src| (
+    let opts = RenderOptions::default;
+    Test::render_to_string(src, opts, f.@width, f.@height)
+);
+
+// Read a file as a UTF-8 String. Returns `Option String` so the
+// caller can distinguish "missing file" (bootstrap a new fixture)
+// from a successful read.
+_read_string_opt : String -> IO (Option String);
+_read_string_opt = |path| (
+    let r = *read_file_string(path).to_result;
+    match r {
+        ok(s)  => pure $ Option::some(s),
+        err(_) => pure $ Option::none()
+    }
+);
+
+// Write `content` to `path`, failing loudly if the IO fails (so the
+// developer notices when their snapshot baseline didn't persist).
+_write_string_or_die : String -> String -> IO ();
+_write_string_or_die = |path, content| (
+    write_file_string(path, content)
+        .try(|err| (
+            eprintln("FATAL: failed to write " + path + ": " + err);;
+            assert(|_| "snapshot baseline write failed: " + path, false)
+        ))
+);
+
+_run_fixture : Fixture -> IO ();
+_run_fixture = |f| (
+    let src_path      = _fixture_dir + f.@name + ".md";
+    let expected_path = _fixture_dir + f.@name + ".expected.txt";
+    let src_opt = *_read_string_opt(src_path);
+    let src = match src_opt {
+        some(s) => s,
+        none()  => "<<missing fixture source: " + src_path + ">>"
+    };
+    let actual = _render_for_fixture(f, src);
+    let expected_opt = *_read_string_opt(expected_path);
+    match expected_opt {
+        none() => (
+            eprintln("BOOTSTRAP: writing initial baseline for " + f.@name
+                     + " → " + expected_path);;
+            _write_string_or_die(expected_path, actual)
+        ),
+        some(expected) => (
+            let exp_norm = _strip_trailing_nl(expected);
+            let act_norm = _strip_trailing_nl(actual);
+            if exp_norm == act_norm {
+                pure()
+            } else {
+                eprintln("SNAPSHOT MISMATCH: " + f.@name);;
+                _print_diff(exp_norm, act_norm);;
+                assert(|_| "snapshot mismatch for fixture " + f.@name, false)
+            }
+        )
+    }
+);
+
+_strip_trailing_nl : String -> String;
+_strip_trailing_nl = |s| (
+    let bs = s.get_bytes;
+    let n = bs.get_size;
+    // Strip trailing NUL (Fix `String` is C-string-backed) then newlines.
+    let n2 = if n > 0 && bs.@(n - 1) == 0_U8 { n - 1 } else { n };
+    let stop = loop(n2, |i| (
+        if i <= 0 { break $ 0 };
+        if bs.@(i - 1) == '\n' { continue $ i - 1 };
+        break $ i
+    ));
+    s.get_sub(0, stop)
+);
+
+_print_diff : String -> String -> IO ();
+_print_diff = |expected, actual| (
+    let exp_rows = expected.split("\n").to_array;
+    let act_rows = actual.split("\n").to_array;
+    let n_e = exp_rows.get_size;
+    let n_a = act_rows.get_size;
+    let n = if n_e > n_a { n_e } else { n_a };
+    loop_m(0, |i| (
+        if i >= n { break_m $ () };
+        let e = if i < n_e { exp_rows.@(i) } else { "<missing>" };
+        let a = if i < n_a { act_rows.@(i) } else { "<missing>" };
+        let prefix = if e == a { "  " } else { "X " };
+        eprintln(prefix + "exp[" + i.to_string + "]: " + e);;
+        eprintln(prefix + "act[" + i.to_string + "]: " + a);;
+        continue_m $ i + 1
+    ))
+);
+
+run : IO ();
+run = (
+    _fixtures.to_iter.fold_m((), |f, _| _run_fixture(f));;
+    println("SnapshotTest: " + _fixtures.get_size.to_string + " fixtures verified")
+);

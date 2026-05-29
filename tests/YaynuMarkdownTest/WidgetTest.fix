@@ -1,0 +1,159 @@
+// MarkdownView widget tests.
+// Covers the scenarios in specs/markdown-widget/spec.md.
+module WidgetTest;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser;
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Style;
+import Yaynu.Markdown.Test;
+import Yaynu.Markdown.Widget;
+import Yaynu.Tui.Buffer;
+import Yaynu.Tui.Frame;
+import Yaynu.Tui.Rect;
+import Yaynu.Term.Key;
+
+_render_view_to_string : MarkdownView -> I64 -> I64 -> String;
+_render_view_to_string = |view, w, h| (
+    let rect = Rect::make(0, 0, w, h);
+    let frame = Frame::new(rect);
+    let frame2 = frame.render_markdown_view(view, rect);
+    Test::buffer_debug_string(frame2.@buffer)
+);
+
+_strip_trailing : String -> String;
+_strip_trailing = |s| (
+    let lines = s.split("\n").map(|line| (
+        let bs = line.get_bytes;
+        let raw = bs.get_size;
+        let nz = if raw > 0 && bs.@(raw - 1) == 0_U8 { raw - 1 } else { raw };
+        let len = loop(nz, |i| (
+            if i <= 0 { break $ 0 };
+            if bs.@(i - 1) == ' ' { continue $ i - 1 };
+            break $ i
+        ));
+        line.get_sub(0, len)
+    )).to_array;
+    let m = lines.get_size;
+    let last = loop(m, |i| (
+        if i <= 0 { break $ 0 };
+        if lines.@(i - 1) == "" { continue $ i - 1 };
+        break $ i
+    ));
+    Array::from_map(last, |i| lines.@(i)).to_iter.join("\n")
+);
+
+run_new_parses_once : IO ();
+run_new_parses_once = (
+    let v = MarkdownView::new("hello");
+    let p = Parser::parse("hello");
+    assert_eq(|_| "MarkdownView::new(src).@document = Parser::parse(src)",
+        v.@document.@blocks.get_size, p.@blocks.get_size)
+);
+
+run_with_options_preserves : IO ();
+run_with_options_preserves = (
+    let v = MarkdownView::new("hello").with_scroll(3);
+    let opts2 = RenderOptions::default.set_wrap(false);
+    let v2 = v.with_options(opts2);
+    let same_scroll = v.@scroll == v2.@scroll;
+    let same_blocks = v.@document.@blocks.get_size == v2.@document.@blocks.get_size;
+    assert_eq(|_| "with_options preserves scroll", same_scroll, true);;
+    assert_eq(|_| "with_options preserves document", same_blocks, true)
+);
+
+run_total_height_matches_estimate : IO ();
+run_total_height_matches_estimate = (
+    let v = MarkdownView::new("one\n\ntwo\n\nthree");
+    let th = v.total_height(20);
+    let est = Render::estimate_height(v.@document, v.@options, 20);
+    assert_eq(|_| "total_height equals Render::estimate_height", th, est)
+);
+
+run_scroll_shifts_content : IO ();
+run_scroll_shifts_content = (
+    let v0 = MarkdownView::new("one\n\ntwo\n\nthree");
+    let out0 = _strip_trailing(_render_view_to_string(v0, 20, 5));
+    let v1 = v0.with_scroll(2);
+    let out1 = _strip_trailing(_render_view_to_string(v1, 20, 5));
+    // With scroll = 2, the first row of the rect is now "two".
+    let first_row_1 = out1.split("\n").to_array.@(0);
+    assert_eq(|_| "scroll=2 shifts first row to 'two'", first_row_1, "two");;
+    // The original first row was "one".
+    let first_row_0 = out0.split("\n").to_array.@(0);
+    assert_eq(|_| "scroll=0 first row is 'one'", first_row_0, "one")
+);
+
+run_scroll_past_end_blank : IO ();
+run_scroll_past_end_blank = (
+    let v = MarkdownView::new("one\n\ntwo").with_scroll(1000);
+    let out = _render_view_to_string(v, 10, 3);
+    // Every row should consist of spaces (the initial blank cells).
+    let all_spaces = out.split("\n").to_array.to_iter.fold(true, |line, acc| (
+        let bs = line.get_bytes;
+        let raw = bs.get_size;
+        let nz = if raw > 0 && bs.@(raw - 1) == 0_U8 { raw - 1 } else { raw };
+        let only_spaces = loop((true, 0), |(ok, i)| (
+            if i >= nz { break $ ok };
+            if bs.@(i) != ' ' { break $ false };
+            continue $ (ok, i + 1)
+        ));
+        acc && only_spaces
+    ));
+    assert_eq(|_| "scroll past end yields blank rows", all_spaces, true)
+);
+
+run_arrow_down_increments : IO ();
+run_arrow_down_increments = (
+    let v = MarkdownView::new("one\n\ntwo\n\nthree").remember_rect(Rect::make(0, 0, 10, 1));
+    let v2 = handle_key(Key::arrow_down(), v);
+    assert_eq(|_| "arrow_down increments scroll", v2.@scroll, 1)
+);
+
+run_arrow_up_clamps : IO ();
+run_arrow_up_clamps = (
+    let v = MarkdownView::new("hello").remember_rect(Rect::make(0, 0, 10, 5));
+    let v2 = handle_key(Key::arrow_up(), v);
+    assert_eq(|_| "arrow_up at scroll=0 stays at 0", v2.@scroll, 0)
+);
+
+run_home_jumps_to_top : IO ();
+run_home_jumps_to_top = (
+    let v = MarkdownView::new("a\n\nb\n\nc\n\nd")
+        .with_scroll(3)
+        .remember_rect(Rect::make(0, 0, 10, 2));
+    let v2 = handle_key(Key::home(), v);
+    assert_eq(|_| "home resets scroll to 0", v2.@scroll, 0)
+);
+
+run_unhandled_key_identity : IO ();
+run_unhandled_key_identity = (
+    let v = MarkdownView::new("hello").with_scroll(2).remember_rect(Rect::make(0, 0, 10, 5));
+    let v2 = handle_key(Key::tab(), v);
+    assert_eq(|_| "unhandled key preserves scroll", v2.@scroll, v.@scroll)
+);
+
+run_j_k_keys : IO ();
+run_j_k_keys = (
+    let v = MarkdownView::new("a\n\nb\n\nc").remember_rect(Rect::make(0, 0, 10, 1));
+    let v_j = handle_key(Key::char("j"), v);
+    assert_eq(|_| "'j' increments scroll", v_j.@scroll, 1);;
+    let v_k = handle_key(Key::char("k"), v_j);
+    assert_eq(|_| "'k' decrements scroll", v_k.@scroll, 0)
+);
+
+run : IO ();
+run = (
+    run_new_parses_once;;
+    run_with_options_preserves;;
+    run_total_height_matches_estimate;;
+    run_scroll_shifts_content;;
+    run_scroll_past_end_blank;;
+    run_arrow_down_increments;;
+    run_arrow_up_clamps;;
+    run_home_jumps_to_top;;
+    run_unhandled_key_identity;;
+    run_j_k_keys;;
+    println("WidgetTest: MarkdownView widget OK")
+);

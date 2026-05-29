@@ -1,0 +1,107 @@
+// Totality test for Yaynu.Markdown.Parser::parse.
+//
+// The spec promises: `parse` is total — for any input `String` it returns
+// a `Document` in finite time and never panics. This file exercises that
+// promise on inputs that historically trip parsers: unbalanced
+// delimiters, deeply nested containers, ragged tables, gibberish.
+//
+// We only assert that a Document came back (and that `blocks.get_size`
+// is observable). Structural assertions belong in the per-feature tests;
+// here we are *only* protecting against panics and divergence.
+module ParserTotalityTest;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser;
+
+_total : String -> IO ();
+_total = |src| (
+    let d = Parser::parse(src);
+    // Touching `blocks.get_size` forces evaluation enough to surface any
+    // hidden panic in lazy-construction paths.
+    let _ = d.@blocks.get_size;
+    pure()
+);
+
+// Build a deeply nested blockquote source: "> > > > > x" for `depth` levels.
+_nested_quote : I64 -> String;
+_nested_quote = |depth| (
+    Iterator::range(0, depth).fold("x", |_, acc| "> " + acc)
+);
+
+// Build a deeply nested emphasis source: "**...** content **...**".
+_nested_emph : I64 -> String;
+_nested_emph = |depth| (
+    Iterator::range(0, depth).fold("body", |_, acc| "*" + acc + "*")
+);
+
+// Repeat a string `n` times.
+_repeat : String -> I64 -> String;
+_repeat = |s, n| (
+    Iterator::range(0, n).fold("", |_, acc| acc + s)
+);
+
+run : IO ();
+run = (
+    // Empty + whitespace.
+    _total("");;
+    _total("\n");;
+    _total("   \n   \n\n");;
+    _total("\r\n\r\n");;
+
+    // Unbalanced inline delimiters.
+    _total("**unclosed");;
+    _total("*unclosed");;
+    _total("_unclosed");;
+    _total("__unclosed");;
+    _total("~~unclosed");;
+    _total("`unclosed");;
+    _total("[unclosed");;
+    _total("![unclosed");;
+    _total("<unclosed");;
+    _total("[a](unclosed");;
+    _total("![a](unclosed");;
+
+    // Bracket/paren soup.
+    _total("[[[]]]");;
+    _total("(((");;
+    _total(")))");;
+    _total("```");;
+    _total("```\nstill open");;
+
+    // Headings around the boundary.
+    _total("#######\n# yes\n###### six\n####### seven");;
+
+    // Deeply nested blockquotes.
+    _total(_nested_quote(50));;
+
+    // Deeply nested emphasis.
+    _total(_nested_emph(40));;
+
+    // Ragged table.
+    _total("| a | b | c |\n| - | - | - |\n| 1 | 2 |\n| 1 | 2 | 3 | 4 |");;
+    _total("| a | b |\n| not a delim |\n| 1 | 2 |");;
+    _total("|\n|\n|");;
+
+    // Lists with weird shapes.
+    _total("- a\n  - b\n    - c\n      - d");;
+    _total("1. a\n2. b\n3. c");;
+    _total("- [ ] one\n- [x] two\n- [X] three\n- [y] four");;
+
+    // Mixed content.
+    _total("# H\n- l\n```\ncode\n```\n> q\n| a | b |\n| - | - |\n| 1 | 2 |");;
+
+    // Long input (1000 lines of "x").
+    _total(_repeat("x\n", 1000));;
+    // Long single line.
+    _total(_repeat("a", 5000));;
+
+    // Punctuation soup.
+    _total("!@#$%^&*()_+-=[]{}|;:'\",.<>/?`~");;
+    _total(_repeat("*_~`[]()<>", 200));;
+
+    // Just the things that could open infinite recursion.
+    _total(_repeat("> ", 200) + "deep");;
+    _total(_repeat("- ", 100) + "x");;
+
+    println("ParserTotalityTest: 28 adversarial inputs parsed without panic")
+);

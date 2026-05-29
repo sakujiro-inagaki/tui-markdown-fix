@@ -1,0 +1,101 @@
+// List rendering tests.
+// Covers the scenarios in specs/markdown-render/spec.md under
+// "List rendering with nesting and task markers".
+module RenderListTest;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser;
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Style;
+import Yaynu.Markdown.Test;
+import Yaynu.Tui.Buffer;
+import Yaynu.Tui.Rect;
+
+_strip_trailing : String -> String;
+_strip_trailing = |s| (
+    let lines = s.split("\n").map(|line| (
+        let bs = line.get_bytes;
+        let raw = bs.get_size;
+        let nz = if raw > 0 && bs.@(raw - 1) == 0_U8 { raw - 1 } else { raw };
+        let len = loop(nz, |i| (
+            if i <= 0 { break $ 0 };
+            if bs.@(i - 1) == ' ' { continue $ i - 1 };
+            break $ i
+        ));
+        line.get_sub(0, len)
+    )).to_array;
+    let m = lines.get_size;
+    let last = loop(m, |i| (
+        if i <= 0 { break $ 0 };
+        if lines.@(i - 1) == "" { continue $ i - 1 };
+        break $ i
+    ));
+    Array::from_map(last, |i| lines.@(i)).to_iter.join("\n")
+);
+
+_render : RenderOptions -> String -> I64 -> I64 -> String;
+_render = |opts, src, w, h| _strip_trailing(Test::render_to_string(src, opts, w, h));
+
+run_three_item_unordered : IO ();
+run_three_item_unordered = (
+    let opts = RenderOptions::default;
+    let src = "- a\n- b\n- c";
+    let out = _render(opts, src, 20, 3);
+    let rows = out.split("\n").to_array;
+    let all_bullet = rows.@(0).find("•", 0).is_some
+                  && rows.@(1).find("•", 0).is_some
+                  && rows.@(2).find("•", 0).is_some;
+    assert_eq(|_| "every item prefixed with default bullet •", all_bullet, true)
+);
+
+run_ordered_list_start : IO ();
+run_ordered_list_start = (
+    let opts = RenderOptions::default;
+    let src = "3. one\n4. two";
+    let out = _render(opts, src, 20, 2);
+    let rows = out.split("\n").to_array;
+    let first_has_3 = rows.@(0).find("3.", 0).is_some;
+    let second_has_4 = rows.@(1).find("4.", 0).is_some;
+    assert_eq(|_| "ordered list start=3 → 3., 4.",
+        first_has_3 && second_has_4, true)
+);
+
+run_task_markers : IO ();
+run_task_markers = (
+    let opts = RenderOptions::default;
+    let src = "- [x] done\n- [ ] todo";
+    let out = _render(opts, src, 20, 2);
+    let rows = out.split("\n").to_array;
+    let has_done = rows.@(0).find("[x]", 0).is_some;
+    let has_pending = rows.@(1).find("[ ]", 0).is_some;
+    assert_eq(|_| "task markers substituted for bullets",
+        has_done && has_pending, true)
+);
+
+run_nested_indentation : IO ();
+run_nested_indentation = (
+    let opts = RenderOptions::default;
+    // Outer + inner nested with indentation. Note the parser inserts
+    // a blank row between the outer paragraph and the inner list,
+    // hence height=3 to include the inner bullet line.
+    let src = "- outer\n  - inner";
+    let out = _render(opts, src, 20, 3);
+    let rows = out.split("\n").to_array;
+    let outer_at_0 = rows.@(0).find("•", 0).map(|i| i == 0).as_some_or(false);
+    // The inner bullet lands on the third row (index 2); index 1 is the
+    // separator blank row between outer paragraph and the nested list.
+    let inner_row = if rows.get_size > 2 { rows.@(2) } else { "" };
+    let inner_indented = inner_row.find("•", 0).map(|i| i > 0).as_some_or(false);
+    assert_eq(|_| "outer item at col 0, inner item indented",
+        outer_at_0 && inner_indented, true)
+);
+
+run : IO ();
+run = (
+    run_three_item_unordered;;
+    run_ordered_list_start;;
+    run_task_markers;;
+    run_nested_indentation;;
+    println("RenderListTest: list rendering OK")
+);

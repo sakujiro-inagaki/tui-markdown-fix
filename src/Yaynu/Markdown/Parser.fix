@@ -1,0 +1,15 @@
+// Top-level parser facade. Composes the block and inline passes.
+//
+// The block pass (`Yaynu.Markdown.Parser.Block::parse`) already calls into
+// the inline pass on each leaf, so `parse` is just a thin wrapper that
+// boxes the resulting `Array Block` into a `Document`.
+module Yaynu.Markdown.Parser;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser.Block;
+
+// Parse a markdown source `String` into a `Document`. Total: returns on
+// any input, never panics. Malformed markdown degrades to best-effort
+// paragraphs.
+parse : String -> Document;
+parse = |src| Document { blocks: Block::parse(src) };

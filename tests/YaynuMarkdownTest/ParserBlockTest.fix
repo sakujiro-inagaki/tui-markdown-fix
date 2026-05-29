@@ -1,0 +1,313 @@
+// Per-scenario tests for Yaynu.Markdown.Parser.Block.
+// Mirrors the block scenarios in specs/markdown-parser/spec.md.
+module ParserBlockTest;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser;
+
+// --- compact pretty-printers (test-local) -----------------------------
+
+_show_inline : Inline -> String;
+_show_inline = |inl| (
+    match inl {
+        text(s)            => "t(" + s + ")",
+        emph(xs)           => "em[" + _show_inlines(xs) + "]",
+        strong(xs)         => "st[" + _show_inlines(xs) + "]",
+        strikethrough(xs)  => "del[" + _show_inlines(xs) + "]",
+        code(s)            => "c(" + s + ")",
+        link((xs, u))      => "lk[" + _show_inlines(xs) + "](" + u + ")",
+        image((a, u))      => "im(" + a + "|" + u + ")",
+        line_break()       => "br",
+        raw_html(s)        => "h(" + s + ")"
+    }
+);
+
+_show_inlines : Array Inline -> String;
+_show_inlines = |xs| xs.to_iter.map(_show_inline).join(",");
+
+_show_alignment : Alignment -> String;
+_show_alignment = |a| (
+    match a {
+        left()   => "L",
+        center() => "C",
+        right()  => "R",
+        none()   => "-"
+    }
+);
+
+_show_block : Block -> String;
+_show_block = |b| (
+    match b {
+        paragraph(xs)      => "P{" + _show_inlines(xs) + "}",
+        heading((l, xs))   => "H" + l.to_string + "{" + _show_inlines(xs) + "}",
+        code_block(cb)     => (
+            let lang = match cb.@language {
+                some(l) => l,
+                none()  => "-"
+            };
+            "CB[" + lang + "]{" + cb.@content + "}"
+        ),
+        blockquote(bs)     => "Q{" + bs.to_iter.map(_show_block).join("|") + "}",
+        list(ml)           => (
+            let head = if ml.@ordered {
+                "OL(" + ml.@start.to_string + "," +
+                    (if ml.@tight { "tight" } else { "loose" }) + ")"
+            } else {
+                "UL(" + (if ml.@tight { "tight" } else { "loose" }) + ")"
+            };
+            head + "{" + ml.@items.to_iter.map(_show_item).join("|") + "}"
+        ),
+        table(tbl)         => (
+            let hdr = tbl.@headers.to_iter.map(_show_inlines).join("|");
+            let al  = tbl.@alignments.to_iter.map(_show_alignment).join("");
+            let body = tbl.@rows.to_iter.map(|row|
+                row.to_iter.map(_show_inlines).join("|")
+            ).join("/");
+            "T[" + al + "]{" + hdr + "//" + body + "}"
+        ),
+        thematic_break()   => "HR",
+        html_block(s)      => "HTML{" + s + "}"
+    }
+);
+
+_show_item : ListItem -> String;
+_show_item = |it| (
+    let task = match it.@task {
+        none()  => "-",
+        some(b) => if b { "x" } else { " " }
+    };
+    "[" + task + "]" + it.@blocks.to_iter.map(_show_block).join(";")
+);
+
+_show_doc : Document -> String;
+_show_doc = |d| d.@blocks.to_iter.map(_show_block).join("\n");
+
+// --- public surface --------------------------------------------------
+
+run_empty : IO ();
+run_empty = (
+    let d = Parser::parse("");
+    assert_eq(|_| "empty input → empty document", d.@blocks.get_size, 0)
+);
+
+run_plain_paragraph : IO ();
+run_plain_paragraph = (
+    let d = Parser::parse("hello world");
+    assert_eq(|_| "single line → one paragraph", _show_doc(d), "P{t(hello world)}")
+);
+
+run_multi_line_paragraph : IO ();
+run_multi_line_paragraph = (
+    let d = Parser::parse("foo\nbar");
+    assert_eq(|_| "two lines merge with soft break (space)",
+        _show_doc(d), "P{t(foo),t( ),t(bar)}")
+);
+
+run_blank_separates : IO ();
+run_blank_separates = (
+    let d = Parser::parse("foo\n\nbar");
+    assert_eq(|_| "blank line separates paragraphs",
+        _show_doc(d), "P{t(foo)}\nP{t(bar)}")
+);
+
+run_hard_break : IO ();
+run_hard_break = (
+    // "foo  \nbar" → hard break between "foo" and "bar".
+    let d = Parser::parse("foo  \nbar");
+    assert_eq(|_| "two trailing spaces → line_break",
+        _show_doc(d), "P{t(foo),br,t(bar)}")
+);
+
+// --- ATX headings ----------------------------------------------------
+
+run_heading_levels : IO ();
+run_heading_levels = (
+    let d1 = Parser::parse("# h1");
+    assert_eq(|_| "H1", _show_doc(d1), "H1{t(h1)}");;
+    let d2 = Parser::parse("## h2");
+    assert_eq(|_| "H2", _show_doc(d2), "H2{t(h2)}");;
+    let d3 = Parser::parse("### h3");
+    assert_eq(|_| "H3", _show_doc(d3), "H3{t(h3)}");;
+    let d4 = Parser::parse("#### h4");
+    assert_eq(|_| "H4", _show_doc(d4), "H4{t(h4)}");;
+    let d5 = Parser::parse("##### h5");
+    assert_eq(|_| "H5", _show_doc(d5), "H5{t(h5)}");;
+    let d6 = Parser::parse("###### h6");
+    assert_eq(|_| "H6", _show_doc(d6), "H6{t(h6)}")
+);
+
+run_seven_hashes_is_paragraph : IO ();
+run_seven_hashes_is_paragraph = (
+    let d = Parser::parse("####### too many");
+    assert_eq(|_| "7 hashes is a paragraph, not a heading",
+        _show_doc(d), "P{t(####### too many)}")
+);
+
+// --- Fenced code -----------------------------------------------------
+
+run_fenced_code_with_language : IO ();
+run_fenced_code_with_language = (
+    let d = Parser::parse("```python\nx = 1\n```");
+    assert_eq(|_| "fenced code captures language and verbatim body",
+        _show_doc(d), "CB[python]{x = 1}")
+);
+
+run_fenced_code_tilde_no_language : IO ();
+run_fenced_code_tilde_no_language = (
+    let d = Parser::parse("~~~\nbody\n~~~");
+    assert_eq(|_| "tilde fence with no language",
+        _show_doc(d), "CB[-]{body}")
+);
+
+run_fenced_unclosed_runs_to_eof : IO ();
+run_fenced_unclosed_runs_to_eof = (
+    let d = Parser::parse("```\na\nb");
+    assert_eq(|_| "unclosed fence consumes to EOF",
+        _show_doc(d), "CB[-]{a\nb}")
+);
+
+// --- Indented code ---------------------------------------------------
+
+run_indented_code : IO ();
+run_indented_code = (
+    let d = Parser::parse("    line1\n    line2");
+    assert_eq(|_| "4-space indented code block",
+        _show_doc(d), "CB[-]{line1\nline2}")
+);
+
+// --- Blockquotes -----------------------------------------------------
+
+run_blockquote_single : IO ();
+run_blockquote_single = (
+    let d = Parser::parse("> quoted");
+    assert_eq(|_| "single-level blockquote contains a paragraph",
+        _show_doc(d), "Q{P{t(quoted)}}")
+);
+
+run_blockquote_nested : IO ();
+run_blockquote_nested = (
+    let d = Parser::parse("> outer\n>> inner");
+    assert_eq(|_| "nested blockquote",
+        _show_doc(d), "Q{P{t(outer)}|Q{P{t(inner)}}}")
+);
+
+// --- Lists -----------------------------------------------------------
+
+run_unordered_list : IO ();
+run_unordered_list = (
+    let d = Parser::parse("- a\n- b\n- c");
+    assert_eq(|_| "unordered list with 3 plain items",
+        _show_doc(d),
+        "UL(tight){[-]P{t(a)}|[-]P{t(b)}|[-]P{t(c)}}")
+);
+
+run_ordered_list_start_3 : IO ();
+run_ordered_list_start_3 = (
+    let d = Parser::parse("3. first\n4. second");
+    assert_eq(|_| "ordered list starting at 3",
+        _show_doc(d),
+        "OL(3,tight){[-]P{t(first)}|[-]P{t(second)}}")
+);
+
+run_task_list : IO ();
+run_task_list = (
+    let d = Parser::parse("- [x] done\n- [ ] todo");
+    assert_eq(|_| "task list with checked + unchecked",
+        _show_doc(d),
+        "UL(tight){[x]P{t(done)}|[ ]P{t(todo)}}")
+);
+
+run_loose_list : IO ();
+run_loose_list = (
+    let d = Parser::parse("- a\n\n- b");
+    assert_eq(|_| "blank line between items → loose",
+        _show_doc(d), "UL(loose){[-]P{t(a)}|[-]P{t(b)}}")
+);
+
+run_nested_list : IO ();
+run_nested_list = (
+    let d = Parser::parse("- outer\n  - inner");
+    assert_eq(|_| "nested list via indent",
+        _show_doc(d),
+        "UL(tight){[-]P{t(outer)};UL(tight){[-]P{t(inner)}}}")
+);
+
+// --- Thematic break --------------------------------------------------
+
+run_thematic_break : IO ();
+run_thematic_break = (
+    let d = Parser::parse("---");
+    assert_eq(|_| "--- → thematic break", _show_doc(d), "HR")
+);
+
+run_mixed_chars_not_break : IO ();
+run_mixed_chars_not_break = (
+    let d = Parser::parse("-*-");
+    assert_eq(|_| "mixed-char rule is a paragraph",
+        _show_doc(d), "P{t(-*-)}")
+);
+
+// --- Tables ----------------------------------------------------------
+
+run_simple_table : IO ();
+run_simple_table = (
+    let d = Parser::parse("| a | b |\n| - | - |\n| 1 | 2 |");
+    assert_eq(|_| "two-column table with one body row",
+        _show_doc(d),
+        "T[--]{t(a)|t(b)//t(1)|t(2)}")
+);
+
+run_table_alignment : IO ();
+run_table_alignment = (
+    let d = Parser::parse("| a | b | c |\n| :--- | :---: | ---: |\n| 1 | 2 | 3 |");
+    assert_eq(|_| "alignment row → L, C, R",
+        _show_doc(d),
+        "T[LCR]{t(a)|t(b)|t(c)//t(1)|t(2)|t(3)}")
+);
+
+run_table_missing_delim_is_paragraph : IO ();
+run_table_missing_delim_is_paragraph = (
+    let d = Parser::parse("| a | b |\nnot a delim row\n| 1 | 2 |");
+    // Falls back to paragraph (all 3 lines joined with soft breaks).
+    let has_table = match d.@blocks.@(0) { table(_) => true, _ => false };
+    assert_eq(|_| "no delim row → no table", has_table, false)
+);
+
+// --- HTML block ------------------------------------------------------
+
+run_html_block : IO ();
+run_html_block = (
+    let d = Parser::parse("<div>content</div>");
+    assert_eq(|_| "html block captures raw text",
+        _show_doc(d), "HTML{<div>content</div>}")
+);
+
+// --- top-level ------------------------------------------------------
+
+run : IO ();
+run = (
+    run_empty;;
+    run_plain_paragraph;;
+    run_multi_line_paragraph;;
+    run_blank_separates;;
+    run_hard_break;;
+    run_heading_levels;;
+    run_seven_hashes_is_paragraph;;
+    run_fenced_code_with_language;;
+    run_fenced_code_tilde_no_language;;
+    run_fenced_unclosed_runs_to_eof;;
+    run_indented_code;;
+    run_blockquote_single;;
+    run_blockquote_nested;;
+    run_unordered_list;;
+    run_ordered_list_start_3;;
+    run_task_list;;
+    run_loose_list;;
+    run_nested_list;;
+    run_thematic_break;;
+    run_mixed_chars_not_break;;
+    run_simple_table;;
+    run_table_alignment;;
+    run_table_missing_delim_is_paragraph;;
+    run_html_block
+);

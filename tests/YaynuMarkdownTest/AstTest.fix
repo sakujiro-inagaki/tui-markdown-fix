@@ -1,0 +1,235 @@
+// Smoke-construction tests for every constructor in Yaynu.Markdown.Ast.
+//
+// The goal here is *not* to exercise behavior — there is none yet, the
+// AST is pure data. The goal is to prove every constructor can be built,
+// every record field can be read, and every pattern match compiles. If a
+// constructor or field gets renamed later, this file is what fails first.
+module AstTest;
+
+import Yaynu.Markdown.Ast;
+
+// --- helpers -----------------------------------------------------------
+
+// Pull a paragraph's text out for assertions. Panics on non-paragraph
+// (these tests construct paragraphs deliberately).
+_para_text : Block -> String;
+_para_text = |b| (
+    let inlines = b.as_paragraph;
+    inlines.to_iter.fold("", |i, acc| acc + (match i {
+        text(s) => s,
+        _       => ""
+    }))
+);
+
+// --- Alignment ---------------------------------------------------------
+
+run_alignment : IO ();
+run_alignment = (
+    let alignments : Array Alignment = [
+        Alignment::left(),
+        Alignment::center(),
+        Alignment::right(),
+        Alignment::none()
+    ];
+    assert_eq(|_| "Alignment: 4 constructors round-trip",
+        alignments.get_size, 4);;
+    let left_is_left = match alignments.@(0) { left() => true, _ => false };
+    assert_eq(|_| "Alignment::left() matches as left", left_is_left, true);;
+    let center_is_center = match alignments.@(1) { center() => true, _ => false };
+    assert_eq(|_| "Alignment::center() matches as center", center_is_center, true);;
+    let right_is_right = match alignments.@(2) { right() => true, _ => false };
+    assert_eq(|_| "Alignment::right() matches as right", right_is_right, true);;
+    let none_is_none = match alignments.@(3) { none() => true, _ => false };
+    assert_eq(|_| "Alignment::none() matches as none", none_is_none, true)
+);
+
+// --- Inline ------------------------------------------------------------
+
+run_inline : IO ();
+run_inline = (
+    let txt = Inline::text("hello");
+    assert_eq(|_| "Inline::text payload", txt.as_text, "hello");;
+
+    let emp = Inline::emph([Inline::text("e")]);
+    assert_eq(|_| "Inline::emph holds one child", emp.as_emph.get_size, 1);;
+
+    let str = Inline::strong([Inline::text("s")]);
+    assert_eq(|_| "Inline::strong holds one child", str.as_strong.get_size, 1);;
+
+    let strk = Inline::strikethrough([Inline::text("x")]);
+    assert_eq(|_| "Inline::strikethrough holds one child",
+        strk.as_strikethrough.get_size, 1);;
+
+    let code = Inline::code("x = 1");
+    assert_eq(|_| "Inline::code payload", code.as_code, "x = 1");;
+
+    let link = Inline::link(([Inline::text("Example")], "https://example.com"));
+    let (link_content, link_url) = link.as_link;
+    assert_eq(|_| "Inline::link URL", link_url, "https://example.com");;
+    assert_eq(|_| "Inline::link content length", link_content.get_size, 1);;
+
+    let img = Inline::image(("logo", "https://example.com/x.png"));
+    let (alt, img_url) = img.as_image;
+    assert_eq(|_| "Inline::image alt", alt, "logo");;
+    assert_eq(|_| "Inline::image URL", img_url, "https://example.com/x.png");;
+
+    let br = Inline::line_break();
+    let br_is_br = match br { line_break() => true, _ => false };
+    assert_eq(|_| "Inline::line_break() matches", br_is_br, true);;
+
+    let html = Inline::raw_html("<span>");
+    assert_eq(|_| "Inline::raw_html payload", html.as_raw_html, "<span>");;
+
+    // Nested: strong wrapping emph (covers spec scenario "Nested emphasis").
+    let nested = Inline::strong([Inline::emph([Inline::text("deep")])]);
+    let outer_kids = nested.as_strong;
+    let inner = outer_kids.@(0).as_emph.@(0).as_text;
+    assert_eq(|_| "Nested strong > emph > text preserves nesting", inner, "deep")
+);
+
+// --- CodeBlock ---------------------------------------------------------
+
+run_code_block : IO ();
+run_code_block = (
+    let fenced = CodeBlock { language: Option::some("python"), content: "x = 1\n" };
+    assert_eq(|_| "Fenced code block language", fenced.@language, Option::some("python"));;
+    assert_eq(|_| "Fenced code block content", fenced.@content, "x = 1\n");;
+
+    let indented = CodeBlock { language: Option::none(), content: "abc" };
+    assert_eq(|_| "Indented code block has no language",
+        indented.@language.is_none, true)
+);
+
+// --- ListItem / MarkdownList ------------------------------------------
+
+run_list : IO ();
+run_list = (
+    let plain = ListItem {
+        task: Option::none(),
+        blocks: [Block::paragraph([Inline::text("a")])]
+    };
+    assert_eq(|_| "Plain item has task=None", plain.@task.is_none, true);;
+
+    let checked = ListItem {
+        task: Option::some(true),
+        blocks: [Block::paragraph([Inline::text("done")])]
+    };
+    assert_eq(|_| "Checked task item has task=Some(true)",
+        checked.@task, Option::some(true));;
+
+    let unchecked = ListItem {
+        task: Option::some(false),
+        blocks: [Block::paragraph([Inline::text("todo")])]
+    };
+    assert_eq(|_| "Unchecked task item has task=Some(false)",
+        unchecked.@task, Option::some(false));;
+
+    let ord = MarkdownList {
+        ordered: true,
+        start: 3,
+        tight: true,
+        items: [plain, checked, unchecked]
+    };
+    assert_eq(|_| "Ordered list start preserved", ord.@start, 3);;
+    assert_eq(|_| "Ordered list has 3 items", ord.@items.get_size, 3);;
+    assert_eq(|_| "Tight is true", ord.@tight, true)
+);
+
+// --- Table -------------------------------------------------------------
+
+run_table : IO ();
+run_table = (
+    let table = Table {
+        headers: [
+            [Inline::text("a")],
+            [Inline::text("b")]
+        ],
+        alignments: [Alignment::left(), Alignment::center()],
+        rows: [
+            [[Inline::text("1")], [Inline::text("2")]],
+            [[Inline::text("3")], [Inline::text("4")]]
+        ]
+    };
+    assert_eq(|_| "Table column count matches headers",
+        table.@headers.get_size, 2);;
+    assert_eq(|_| "Table alignment count matches headers",
+        table.@alignments.get_size, table.@headers.get_size);;
+    assert_eq(|_| "Table row count", table.@rows.get_size, 2);;
+    assert_eq(|_| "Every row has the same column count as headers",
+        table.@rows.@(0).get_size, table.@headers.get_size)
+);
+
+// --- Block + Document -------------------------------------------------
+
+run_block_and_document : IO ();
+run_block_and_document = (
+    let h = Block::heading((1, [Inline::text("Title")]));
+    let (level, _hcontent) = h.as_heading;
+    assert_eq(|_| "Heading level", level, 1);;
+
+    let p = Block::paragraph([Inline::text("hello world")]);
+    assert_eq(|_| "Paragraph round-trips text", _para_text(p), "hello world");;
+
+    let cb = Block::code_block(CodeBlock {
+        language: Option::some("fix"),
+        content: "main : IO ();"
+    });
+    assert_eq(|_| "code_block extracts payload",
+        cb.as_code_block.@language, Option::some("fix"));;
+
+    // Recursive blockquote: outer holds [paragraph, blockquote([paragraph])].
+    let inner_quote = Block::blockquote([Block::paragraph([Inline::text("inner")])]);
+    let outer_quote = Block::blockquote([
+        Block::paragraph([Inline::text("outer")]),
+        inner_quote
+    ]);
+    let outer_kids = outer_quote.as_blockquote;
+    assert_eq(|_| "blockquote has 2 children", outer_kids.get_size, 2);;
+    let nested_kid = outer_kids.@(1).as_blockquote.@(0);
+    assert_eq(|_| "Nested blockquote preserves inner paragraph",
+        _para_text(nested_kid), "inner");;
+
+    let list_block = Block::list(MarkdownList {
+        ordered: false,
+        start: 1,
+        tight: true,
+        items: [ListItem { task: Option::none(), blocks: [p] }]
+    });
+    assert_eq(|_| "list block carries MarkdownList",
+        list_block.as_list.@items.get_size, 1);;
+
+    let table_block = Block::table(Table {
+        headers: [[Inline::text("h")]],
+        alignments: [Alignment::none()],
+        rows: []
+    });
+    assert_eq(|_| "table block carries Table",
+        table_block.as_table.@headers.get_size, 1);;
+
+    let tb = Block::thematic_break();
+    let tb_is_tb = match tb { thematic_break() => true, _ => false };
+    assert_eq(|_| "thematic_break() matches", tb_is_tb, true);;
+
+    let html = Block::html_block("<div>x</div>");
+    assert_eq(|_| "html_block payload", html.as_html_block, "<div>x</div>");;
+
+    let doc = Document { blocks: [h, p, tb, html] };
+    assert_eq(|_| "Document preserves block ordering and count",
+        doc.@blocks.get_size, 4);;
+
+    let empty_doc = Document { blocks: [] };
+    assert_eq(|_| "Empty document has 0 blocks",
+        empty_doc.@blocks.get_size, 0)
+);
+
+// --- Top-level entry --------------------------------------------------
+
+run : IO ();
+run = (
+    run_alignment;;
+    run_inline;;
+    run_code_block;;
+    run_list;;
+    run_table;;
+    run_block_and_document
+);

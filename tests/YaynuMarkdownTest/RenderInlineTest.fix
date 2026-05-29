@@ -1,0 +1,101 @@
+// Inline rendering tests.
+// Covers the scenarios in specs/markdown-render/spec.md under
+// "Inline styles" (image placeholder, link display, style composition).
+module RenderInlineTest;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser;
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Render.Inline;
+import Yaynu.Markdown.Style;
+import Yaynu.Markdown.Test;
+import Yaynu.Tui.Style;
+import Yaynu.Term.Ansi;
+
+_strip_trailing : String -> String;
+_strip_trailing = |s| (
+    let lines = s.split("\n").map(|line| (
+        let bs = line.get_bytes;
+        let raw = bs.get_size;
+        let nz = if raw > 0 && bs.@(raw - 1) == 0_U8 { raw - 1 } else { raw };
+        let len = loop(nz, |i| (
+            if i <= 0 { break $ 0 };
+            if bs.@(i - 1) == ' ' { continue $ i - 1 };
+            break $ i
+        ));
+        line.get_sub(0, len)
+    )).to_array;
+    let m = lines.get_size;
+    let last = loop(m, |i| (
+        if i <= 0 { break $ 0 };
+        if lines.@(i - 1) == "" { continue $ i - 1 };
+        break $ i
+    ));
+    Array::from_map(last, |i| lines.@(i)).to_iter.join("\n")
+);
+
+_render : String -> I64 -> I64 -> String;
+_render = |src, w, h| (
+    let opts = RenderOptions::default;
+    _strip_trailing(Test::render_to_string(src, opts, w, h))
+);
+
+run_image_placeholder : IO ();
+run_image_placeholder = (
+    let out = _render("![logo](https://example.com/x.png)", 30, 2);
+    let has_placeholder = out.find("[image: logo]", 0).is_some;
+    assert_eq(|_| "image renders as [image: alt]", has_placeholder, true)
+);
+
+run_link_display_only : IO ();
+run_link_display_only = (
+    let out = _render("[Example](https://example.com)", 30, 2);
+    let has_display = out.find("Example", 0).is_some;
+    let has_url = out.find("example.com", 0).is_some;
+    assert_eq(|_| "link display text shown", has_display, true);;
+    assert_eq(|_| "link URL not rendered in v0.1", has_url, false)
+);
+
+run_style_overlay : IO ();
+run_style_overlay = (
+    let base = Style::default;
+    let child = Style::default.set_bold(true);
+    let merged = Inline::overlay(base, child);
+    assert_eq(|_| "overlay sets bold when child sets bold",
+        merged.@bold, true);;
+    // Inverse: a `Some` colour on the child wins over `None` base.
+    let base2 = Style::default;
+    let child2 = Style::default.with_fg(Color::named(Color16::cyan()));
+    let merged2 = Inline::overlay(base2, child2);
+    assert_eq(|_| "overlay copies child fg when set",
+        merged2.@fg.is_some, true)
+);
+
+// Regression: the space inside a multi-word link should carry the
+// link's style (so the underline doesn't break at the space).
+run_link_space_underlined : IO ();
+run_link_space_underlined = (
+    let opts = RenderOptions::default;
+    let link_inline = Inline::link(([Inline::text("example link")], "https://example.com"));
+    let (toks, _next_idx) = Inline::inlines_to_tokens([link_inline], Style::default, opts, 0);
+    // Expect: word("example", link), space(link), word("link", link).
+    // Find the `space` token and assert its style has underline set
+    // (palette.default.@link is `with_fg(cyan).set_underline(true)`).
+    let space_underlined = toks.to_iter.fold(false, |t, acc| (
+        match t {
+            space(sty) => acc || sty.@underline,
+            _ => acc
+        }
+    ));
+    assert_eq(|_| "space inside link inherits underline", space_underlined, true)
+);
+
+run : IO ();
+run = (
+    run_image_placeholder;;
+    run_link_display_only;;
+    run_style_overlay;;
+    run_link_space_underlined;;
+    println("RenderInlineTest: inline rendering OK")
+);

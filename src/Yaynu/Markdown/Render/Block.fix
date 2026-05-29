@@ -1,0 +1,382 @@
+// Block rendering. Produces `Array RenderedLine` for any `Block`,
+// recursing into blockquote/list contents. Tables delegate to
+// `Render/Table`; inline wrapping delegates to `Render/Inline`.
+//
+// "Rendered line" is an `Array (String, Style)` — a sequence of
+// styled fragments laid out left-to-right within a single row. Empty
+// arrays denote blank rows.
+module Yaynu.Markdown.Render.Block;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Style;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Render.Inline;
+import Yaynu.Markdown.Render.Table;
+import Yaynu.Tui.Style;
+import Yaynu.Tui.Width;
+
+// ----------------------------------------------------------------------
+// Public entry points.
+
+// Render an array of blocks separated by one blank row between
+// consecutive blocks (no leading / trailing blank rows). Threads the
+// global link counter through every block so the `selected_link` index
+// the renderer compares against matches `Ast::collect_links`'s order.
+render_blocks : Array Block -> RenderOptions -> I64 -> I64
+                -> (Array (Array (String, Style)), I64);
+render_blocks = |blocks, opts, width, start_idx| (
+    if width <= 0 { ([], start_idx) };
+    let n = blocks.get_size;
+    if n == 0 { ([], start_idx) };
+    loop((([], start_idx), 0), |((acc, idx), i)| (
+        if i >= n { break $ (acc, idx) };
+        let (block_lines, next_idx) = render_block(blocks.@(i), opts, width, idx);
+        let acc2 = if i == 0 { acc.append(block_lines) }
+                   else { acc.push_back([]).append(block_lines) };
+        continue $ ((acc2, next_idx), i + 1)
+    ))
+);
+
+// Render one `Block`, advancing the link counter past every link the
+// block (or its descendants) contains.
+render_block : Block -> RenderOptions -> I64 -> I64
+               -> (Array (Array (String, Style)), I64);
+render_block = |b, opts, width, idx| (
+    if width <= 0 { ([], idx) };
+    match b {
+        paragraph(inlines)   => _render_paragraph(inlines, opts, width, idx),
+        heading((lvl, ins))  => _render_heading(lvl, ins, opts, width, idx),
+        code_block(cb)       => (_render_code_block(cb, opts, width), idx),
+        blockquote(inner)    => _render_blockquote(inner, opts, width, idx),
+        list(lst)            => _render_list(lst, opts, width, 0, idx),
+        table(tbl)           => render_table_lines(tbl, opts, width, idx),
+        thematic_break()     => (_render_thematic_break(opts, width), idx),
+        html_block(s)        => (_render_html_block(s, opts, width), idx)
+    }
+);
+
+// ----------------------------------------------------------------------
+// Per-block renderers.
+
+_render_paragraph : Array Inline -> RenderOptions -> I64 -> I64
+                    -> (Array (Array (String, Style)), I64);
+_render_paragraph = |inlines, opts, width, idx| (
+    let base = opts.@style.@text;
+    let (toks, next_idx) = inlines_to_tokens(inlines, base, opts, idx);
+    (wrap_tokens(width, toks), next_idx)
+);
+
+_render_heading : I64 -> Array Inline -> RenderOptions -> I64 -> I64
+                  -> (Array (Array (String, Style)), I64);
+_render_heading = |level, inlines, opts, width, idx| (
+    let palette = opts.@style;
+    let lvl_idx = if level < 1 { 0 } else if level > 6 { 5 } else { level - 1 };
+    let base = if lvl_idx < palette.@heading.get_size { palette.@heading.@(lvl_idx) }
+               else { palette.@text };
+    let (toks, next_idx) = inlines_to_tokens(inlines, base, opts, idx);
+    (wrap_tokens(width, toks), next_idx)
+);
+
+_render_thematic_break : RenderOptions -> I64 -> Array (Array (String, Style));
+_render_thematic_break = |opts, width| (
+    let g = opts.@thematic_break_char;
+    let gw = Width::string_width(g);
+    if gw <= 0 { [[]] } else {
+        let reps = width / gw;
+        let s = loop(("", 0), |(acc, i)| (
+            if i >= reps { break $ acc };
+            continue $ (acc + g, i + 1)
+        ));
+        [[(s, opts.@style.@thematic_break)]]
+    }
+);
+
+_render_html_block : String -> RenderOptions -> I64
+                     -> Array (Array (String, Style));
+_render_html_block = |s, opts, width| (
+    let style = opts.@style.@text;
+    let raw_lines = s.split("\n").to_array;
+    raw_lines.to_iter.fold([], |line, acc| (
+        let l = if line.get_size > 0 {
+            let bs = line.get_bytes;
+            let n = bs.get_size;
+            if n > 0 && bs.@(n - 1) == '\r' { line.get_sub(0, n - 1) } else { line }
+        } else { line };
+        let truncated = Width::truncate(width, l);
+        acc.push_back([(truncated, style)])
+    ))
+);
+
+// ----------------------------------------------------------------------
+// Code blocks.
+
+_render_code_block : CodeBlock -> RenderOptions -> I64
+                     -> Array (Array (String, Style));
+_render_code_block = |cb, opts, width| (
+    if opts.@code_block_border {
+        _render_code_bordered(cb, opts, width)
+    } else {
+        _render_code_plain(cb, opts, width)
+    }
+);
+
+// Unbordered code block: optional language label line, then the body.
+_render_code_plain : CodeBlock -> RenderOptions -> I64
+                     -> Array (Array (String, Style));
+_render_code_plain = |cb, opts, width| (
+    let body_style = opts.@style.@code_block;
+    let body_lines = _format_code_body(cb.@content, body_style, opts.@wrap_code, width);
+    if opts.@show_code_block_language {
+        match cb.@language {
+            some(lang) => (
+                if lang == "" { body_lines } else {
+                    let label_line : Array (String, Style) =
+                        [(Width::truncate(width, lang), opts.@style.@table_border)];
+                    [label_line].append(body_lines)
+                }
+            ),
+            none() => body_lines
+        }
+    } else { body_lines }
+);
+
+// Bordered code block: top + body + bottom with side verticals.
+_render_code_bordered : CodeBlock -> RenderOptions -> I64
+                        -> Array (Array (String, Style));
+_render_code_bordered = |cb, opts, width| (
+    let border_style = opts.@style.@table_border;
+    let body_style = opts.@style.@code_block;
+    let inner_w = if width >= 2 { width - 2 } else { 0 };
+    if inner_w <= 0 { [] };
+    let body_lines = _format_code_body(cb.@content, body_style, opts.@wrap_code, inner_w);
+
+    let label = if opts.@show_code_block_language {
+        match cb.@language { some(s) => s, none() => "" }
+    } else { "" };
+    let top = _bordered_top(width, label, border_style);
+    let bottom = _bordered_bottom(width, border_style);
+
+    let v_left  : (String, Style) = ("│", border_style);
+    let v_right : (String, Style) = ("│", border_style);
+    let body_rows = body_lines.to_iter.fold([], |line, acc| (
+        let row : Array (String, Style) = [v_left];
+        let line_w = line.to_iter.fold(0, |(s, _), acc2| acc2 + Width::string_width(s));
+        let pad = inner_w - line_w;
+        let line2 = line.to_iter.fold(row, |t, acc2| acc2.push_back(t));
+        let line3 = if pad > 0 {
+            line2.push_back((_pad_spaces(pad), Style::default))
+        } else { line2 };
+        acc.push_back(line3.push_back(v_right))
+    ));
+
+    [top].append(body_rows).push_back(bottom)
+);
+
+// Top border `┌── lang ──────┐` (no language: `┌──...──┐`).
+_bordered_top : I64 -> String -> Style -> Array (String, Style);
+_bordered_top = |width, label, style| (
+    if width < 2 { [] };
+    if label == "" {
+        let mid = loop(("", 0), |(acc, i)| (
+            if i >= width - 2 { break $ acc };
+            continue $ (acc + "─", i + 1)
+        ));
+        [("┌" + mid + "┐", style)]
+    } else {
+        // Reserve "─ <lang> " (1 + 1 + label_w + 1) = label_w + 3 cols.
+        let label_w = Width::string_width(label);
+        let prefix_cols = 2; // "┌─"
+        let suffix_cols = 1; // "┐"
+        let label_with_pad_cols = label_w + 2; // " label "
+        let trailing = width - prefix_cols - suffix_cols - label_with_pad_cols;
+        let fill = if trailing > 0 {
+            loop(("", 0), |(acc, i)| (
+                if i >= trailing { break $ acc };
+                continue $ (acc + "─", i + 1)
+            ))
+        } else { "" };
+        let truncated_label = if trailing < 0 {
+            Width::truncate_with_ellipsis(width - prefix_cols - suffix_cols - 2, label)
+        } else { label };
+        [("┌─ " + truncated_label + " " + fill + "┐", style)]
+    }
+);
+
+_bordered_bottom : I64 -> Style -> Array (String, Style);
+_bordered_bottom = |width, style| (
+    if width < 2 { [] };
+    let mid = loop(("", 0), |(acc, i)| (
+        if i >= width - 2 { break $ acc };
+        continue $ (acc + "─", i + 1)
+    ));
+    [("└" + mid + "┘", style)]
+);
+
+// Split body content by `\n`, then either character-wrap or truncate
+// each source line per `wrap_code`. Returns a sequence of styled
+// rows.
+_format_code_body : String -> Style -> Bool -> I64
+                    -> Array (Array (String, Style));
+_format_code_body = |content, style, wrap_code, width| (
+    if width <= 0 { [] };
+    let raw_lines = content.split("\n").to_array;
+    // Drop a trailing empty line if the content ends in '\n'
+    // (avoids an extra blank row at the bottom of code blocks).
+    let n_raw = raw_lines.get_size;
+    let trimmed = if n_raw > 0 && raw_lines.@(n_raw - 1) == "" {
+        Array::from_map(n_raw - 1, |i| raw_lines.@(i))
+    } else { raw_lines };
+    trimmed.to_iter.fold([], |raw, acc| (
+        let line = if raw.get_size > 0 {
+            let bs = raw.get_bytes;
+            let n = bs.get_size;
+            if n > 0 && bs.@(n - 1) == '\r' { raw.get_sub(0, n - 1) } else { raw }
+        } else { raw };
+        if wrap_code {
+            acc.append(_char_wrap_line(line, style, width))
+        } else {
+            let line_w = Width::string_width(line);
+            let visible = if line_w <= width { line } else {
+                Width::truncate_with_ellipsis(width, line)
+            };
+            acc.push_back([(visible, style)])
+        }
+    ))
+);
+
+// Character-wrap one logical line into rows of width `width`.
+_char_wrap_line : String -> Style -> I64 -> Array (Array (String, Style));
+_char_wrap_line = |line, style, width| (
+    let clusters = Width::iter_graphemes(line).to_array;
+    let n = clusters.get_size;
+    if n == 0 { [[]] };
+    let (rows, cur, cur_w) = loop(([], "", 0, 0), |(rows, cur, cur_w, i)| (
+        if i >= n { break $ (rows, cur, cur_w) };
+        let g = clusters.@(i);
+        let gw = g.@width;
+        if gw > width { continue $ (rows, cur, cur_w, i + 1) };
+        if cur_w + gw > width {
+            continue $ (rows.push_back([(cur, style)]), g.@text, gw, i + 1)
+        } else {
+            continue $ (rows, cur + g.@text, cur_w + gw, i + 1)
+        }
+    ));
+    if cur_w > 0 { rows.push_back([(cur, style)]) } else { rows }
+);
+
+// ----------------------------------------------------------------------
+// Blockquote.
+
+_render_blockquote : Array Block -> RenderOptions -> I64 -> I64
+                     -> (Array (Array (String, Style)), I64);
+_render_blockquote = |inner, opts, width, idx| (
+    let marker_style = opts.@style.@blockquote_marker;
+    let body_palette = opts.@style.set_text(opts.@style.@blockquote);
+    let opts2 = opts.set_style(body_palette);
+    let inner_w = if width >= 2 { width - 2 } else { 0 };
+    if inner_w <= 0 { ([], idx) };
+    let (inner_lines, next_idx) = render_blocks(inner, opts2, inner_w, idx);
+    let lines = inner_lines.to_iter.fold([], |line, acc| (
+        let prefix : Array (String, Style) = [("│ ", marker_style)];
+        acc.push_back(prefix.append(line))
+    ));
+    (lines, next_idx)
+);
+
+// ----------------------------------------------------------------------
+// Lists.
+
+_render_list : MarkdownList -> RenderOptions -> I64 -> I64 -> I64
+               -> (Array (Array (String, Style)), I64);
+_render_list = |lst, opts, width, level, start_idx| (
+    let palette = opts.@style;
+    let items = lst.@items;
+    let n = items.get_size;
+    if n == 0 { ([], start_idx) };
+    loop((([], start_idx), 0), |((acc, cur_idx), i)| (
+        if i >= n { break $ (acc, cur_idx) };
+        let item = items.@(i);
+        let marker = _list_marker(lst, opts, item, i);
+        let marker_style = _list_marker_style(item, palette);
+        let marker_w = Width::string_width(marker);
+        let indent_str = _pad_spaces(opts.@indent_unit * level);
+        let prefix_w = (opts.@indent_unit * level) + marker_w + 1; // marker + space
+        let inner_w = if width > prefix_w { width - prefix_w } else { 1 };
+        let (item_lines, next_idx) = render_blocks(item.@blocks, opts, inner_w, cur_idx);
+        let lines_with_prefix = _prefix_item(item_lines, indent_str, marker, marker_style,
+                                              prefix_w, palette.@text);
+        let acc2 = if i == 0 { acc.append(lines_with_prefix) }
+                   else if lst.@tight { acc.append(lines_with_prefix) }
+                   else { acc.push_back([]).append(lines_with_prefix) };
+        continue $ ((acc2, next_idx), i + 1)
+    ))
+);
+
+_list_marker : MarkdownList -> RenderOptions -> ListItem -> I64 -> String;
+_list_marker = |lst, opts, item, idx| (
+    match item.@task {
+        some(done) => if done { opts.@task_done_marker } else { opts.@task_pending_marker },
+        none() => (
+            if lst.@ordered {
+                (lst.@start + idx).to_string + "."
+            } else {
+                let bms = opts.@bullet_markers;
+                if bms.get_size == 0 { "•" } else { bms.@(0) }
+            }
+        )
+    }
+);
+
+_list_marker_style : ListItem -> MarkdownStyle -> Style;
+_list_marker_style = |item, palette| (
+    match item.@task {
+        some(done) => if done { palette.@task_done } else { palette.@task_pending },
+        none()     => palette.@text
+    }
+);
+
+// Add marker + indent prefix to the first line of the item, and a
+// matching whitespace prefix to subsequent lines. `text_style` is
+// used for the space between marker and content.
+_prefix_item : Array (Array (String, Style)) -> String -> String -> Style -> I64 -> Style
+               -> Array (Array (String, Style));
+_prefix_item = |lines, indent_str, marker, marker_style, prefix_w, text_style| (
+    let m = lines.get_size;
+    if m == 0 { [] };
+    let cont_indent = _pad_spaces(prefix_w);
+    loop(([], 0), |(acc, i)| (
+        if i >= m { break $ acc };
+        let line = lines.@(i);
+        let prefixed = if i == 0 {
+            let spans : Array (String, Style) = [];
+            let spans = if indent_str != "" { spans.push_back((indent_str, Style::default)) } else { spans };
+            spans.push_back((marker + " ", marker_style)).append(line)
+        } else {
+            let spans : Array (String, Style) = [(cont_indent, Style::default)];
+            spans.append(line)
+        };
+        continue $ (acc.push_back(prefixed), i + 1)
+    ))
+);
+
+// ----------------------------------------------------------------------
+// Internal nesting helper exposed so the list renderer can be called
+// recursively with bumped level.
+render_list_at_level : MarkdownList -> RenderOptions -> I64 -> I64 -> I64
+                       -> (Array (Array (String, Style)), I64);
+render_list_at_level = |lst, opts, width, level, start_idx| (
+    _render_list(lst, opts, width, level, start_idx)
+);
+
+// ----------------------------------------------------------------------
+// Small string helpers (duplicated rather than imported to keep this
+// module standalone — same as in `Render/Table`).
+
+_pad_spaces : I64 -> String;
+_pad_spaces = |n| (
+    if n <= 0 { "" };
+    loop(("", 0), |(acc, i)| (
+        if i >= n { break $ acc };
+        continue $ (acc + " ", i + 1)
+    ))
+);

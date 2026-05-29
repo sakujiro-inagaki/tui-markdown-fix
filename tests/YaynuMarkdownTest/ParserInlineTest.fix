@@ -1,0 +1,167 @@
+// Per-scenario tests for Yaynu.Markdown.Parser.Inline.
+// One test per scenario in specs/markdown-parser/spec.md inline requirements.
+module ParserInlineTest;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser.Inline;
+
+// --- pretty-printer helpers (test-local) ------------------------------
+
+// Render an Inline tree into a compact tag-based string so assertions
+// can compare against a single literal. Format:
+//   text(...)   emph[...]   strong[...]   strike[...]   code(...)
+//   link[...](url)   img(alt|url)   br   html(...)
+_show_inline : Inline -> String;
+_show_inline = |inl| (
+    match inl {
+        text(s)          => "t(" + s + ")",
+        emph(xs)         => "em[" + _show_inlines(xs) + "]",
+        strong(xs)       => "st[" + _show_inlines(xs) + "]",
+        strikethrough(xs)=> "del[" + _show_inlines(xs) + "]",
+        code(s)          => "c(" + s + ")",
+        link((xs, url))  => "lk[" + _show_inlines(xs) + "](" + url + ")",
+        image((a, u))    => "im(" + a + "|" + u + ")",
+        line_break()     => "br",
+        raw_html(s)      => "h(" + s + ")"
+    }
+);
+
+_show_inlines : Array Inline -> String;
+_show_inlines = |xs| xs.to_iter.map(_show_inline).join(",");
+
+// --- plain text --------------------------------------------------------
+
+run_plain_text : IO ();
+run_plain_text = (
+    let got = parse("hello world");
+    assert_eq(|_| "plain text → single text", _show_inlines(got), "t(hello world)");;
+    let empty = parse("");
+    assert_eq(|_| "empty string → 0 inlines", empty.get_size, 0)
+);
+
+// --- emph / strong / strikethrough ------------------------------------
+
+run_emph_strong : IO ();
+run_emph_strong = (
+    let got = parse("**bold** and *italic*");
+    assert_eq(|_| "**bold** and *italic* parses",
+        _show_inlines(got),
+        "st[t(bold)],t( and ),em[t(italic)]");;
+
+    let got2 = parse("~~gone~~");
+    assert_eq(|_| "~~strike~~ parses",
+        _show_inlines(got2),
+        "del[t(gone)]");;
+
+    let got3 = parse("_em_");
+    assert_eq(|_| "_em_ parses as emph (not inside word)",
+        _show_inlines(got3),
+        "em[t(em)]");;
+
+    let got4 = parse("__strong__");
+    assert_eq(|_| "__strong__ parses as strong",
+        _show_inlines(got4),
+        "st[t(strong)]")
+);
+
+run_inside_word_underscore : IO ();
+run_inside_word_underscore = (
+    let got = parse("foo_bar_baz");
+    assert_eq(|_| "foo_bar_baz: no emph",
+        _show_inlines(got),
+        "t(foo_bar_baz)")
+);
+
+run_unmatched_delim : IO ();
+run_unmatched_delim = (
+    let got = parse("*unclosed");
+    assert_eq(|_| "unmatched * is literal",
+        _show_inlines(got),
+        "t(*unclosed)")
+);
+
+// --- code --------------------------------------------------------------
+
+run_code : IO ();
+run_code = (
+    let got = parse("`x = 1`");
+    assert_eq(|_| "`x = 1` → code",
+        _show_inlines(got),
+        "c(x = 1)");;
+
+    let got2 = parse("`unclosed");
+    assert_eq(|_| "unclosed backtick is literal",
+        _show_inlines(got2),
+        "t(`unclosed)")
+);
+
+// --- link / image ------------------------------------------------------
+
+run_link : IO ();
+run_link = (
+    let got = parse("[Example](https://example.com)");
+    assert_eq(|_| "[Example](url) parses to link",
+        _show_inlines(got),
+        "lk[t(Example)](https://example.com)")
+);
+
+run_image : IO ();
+run_image = (
+    let got = parse("![logo](https://example.com/x.png)");
+    assert_eq(|_| "image with alt + url",
+        _show_inlines(got),
+        "im(logo|https://example.com/x.png)")
+);
+
+// --- autolinks ---------------------------------------------------------
+
+run_angle_autolink : IO ();
+run_angle_autolink = (
+    let got = parse("<https://example.com>");
+    assert_eq(|_| "<url> angle autolink",
+        _show_inlines(got),
+        "lk[t(https://example.com)](https://example.com)")
+);
+
+run_bare_autolink : IO ();
+run_bare_autolink = (
+    let got = parse("see https://example.com for more");
+    assert_eq(|_| "bare http(s) URL in text autolinks",
+        _show_inlines(got),
+        "t(see ),lk[t(https://example.com)](https://example.com),t( for more)")
+);
+
+run_bare_autolink_trailing_punct : IO ();
+run_bare_autolink_trailing_punct = (
+    let got = parse("see https://example.com.");
+    assert_eq(|_| "trailing '.' is peeled off the URL",
+        _show_inlines(got),
+        "t(see ),lk[t(https://example.com)](https://example.com),t(.)")
+);
+
+// --- raw_html ----------------------------------------------------------
+
+run_inline_html : IO ();
+run_inline_html = (
+    let got = parse("a <span>b</span> c");
+    assert_eq(|_| "inline <span> / </span> as raw_html",
+        _show_inlines(got),
+        "t(a ),h(<span>),t(b),h(</span>),t( c)")
+);
+
+// --- top-level ---------------------------------------------------------
+
+run : IO ();
+run = (
+    run_plain_text;;
+    run_emph_strong;;
+    run_inside_word_underscore;;
+    run_unmatched_delim;;
+    run_code;;
+    run_link;;
+    run_image;;
+    run_angle_autolink;;
+    run_bare_autolink;;
+    run_bare_autolink_trailing_punct;;
+    run_inline_html
+);

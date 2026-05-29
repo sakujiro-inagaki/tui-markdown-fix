@@ -1,0 +1,61 @@
+// Test helpers for `Yaynu.Markdown`.
+//
+// Why this lives in the library (not in `tui-fix` upstream): it
+// inspects a `tui-fix` `Buffer` to produce a plain-text dump used by
+// snapshot tests. The dump format is shaped around the markdown
+// renderer's needs (continuation cells become an empty space, padding
+// trims trailing blanks), so it isn't generally useful outside this
+// project.
+//
+// Public surface:
+//   - `buffer_debug_string : Buffer -> String` — row-major plain-text
+//     dump with one row per line; styles discarded.
+//   - `render_to_string : String -> RenderOptions -> I64 -> I64 -> String`
+//     — parse + render a source into a fixed-size buffer + dump as
+//     text. Used by the snapshot harness.
+module Yaynu.Markdown.Test;
+
+import Yaynu.Markdown.Parser;
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Tui.Buffer;
+import Yaynu.Tui.Cell;
+import Yaynu.Tui.Rect;
+
+// Convert a buffer to a newline-joined plain-text dump.
+//
+// Conventions:
+// - One row per output line, separated by `\n`.
+// - Continuation cells (the right half of a double-width grapheme)
+//   are emitted as empty strings — the cell to their left already
+//   carries the full grapheme so the resulting row reads correctly
+//   under `String::get_size` / display.
+// - Trailing whitespace on each row is preserved (callers can strip
+//   if needed; snapshots are byte-exact so the harness needs the
+//   trailing structure).
+// - No final trailing newline.
+buffer_debug_string : Buffer -> String;
+buffer_debug_string = |buf| (
+    let w = buf.@width;
+    let h = buf.@height;
+    if h <= 0 { "" };
+    loop(("", 0), |(acc, y)| (
+        if y >= h { break $ acc };
+        let row = loop(("", 0), |(line, x)| (
+            if x >= w { break $ line };
+            let cell = buf.@cells.@(y * w + x);
+            continue $ (line + cell.@ch, x + 1)
+        ));
+        let acc2 = if y == 0 { row } else { acc + "\n" + row };
+        continue $ (acc2, y + 1)
+    ))
+);
+
+// Convenience: parse + render to a `width x height` buffer + dump.
+render_to_string : String -> RenderOptions -> I64 -> I64 -> String;
+render_to_string = |src, opts, width, height| (
+    let buf = Buffer::empty(width, height);
+    let rect = Rect::make(0, 0, width, height);
+    let (_rows, buf2) = Render::render_string(src, opts, rect, buf);
+    buffer_debug_string(buf2)
+);

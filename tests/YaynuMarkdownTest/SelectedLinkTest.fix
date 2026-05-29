@@ -1,0 +1,200 @@
+// Tests for `RenderOptions.@selected_link` — the renderer-side
+// highlight. Covers the scenarios in
+// specs/markdown-render/spec.md under "Selected-link highlight" and
+// "Link counter agrees with collect_links".
+//
+// These assertions read per-cell `Style.@reverse` directly off the
+// rendered `Buffer`, since the snapshot harness's plain-text dump
+// throws styles away.
+module SelectedLinkTest;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser;
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Style;
+import Yaynu.Tui.Buffer;
+import Yaynu.Tui.Cell;
+import Yaynu.Tui.Rect;
+import Yaynu.Tui.Style;
+
+// Render `src` into a fresh `width x height` buffer with `opts` and
+// return the resulting buffer.
+_render_to_buffer : String -> RenderOptions -> I64 -> I64 -> Buffer;
+_render_to_buffer = |src, opts, w, h| (
+    let buf = Buffer::empty(w, h);
+    let rect = Rect::make(0, 0, w, h);
+    let (_rows, buf2) = Render::render_string(src, opts, rect, buf);
+    buf2
+);
+
+// True iff there exists a non-blank cell in `buf` whose grapheme is
+// `ch` and whose style has `reverse = true`.
+_any_reverse_cell_with : String -> Buffer -> Bool;
+_any_reverse_cell_with = |ch, buf| (
+    let w = buf.@width;
+    let h = buf.@height;
+    loop((false, 0), |(found, y)| (
+        if found || y >= h { break $ found };
+        let row_found = loop((false, 0), |(rf, x)| (
+            if rf || x >= w { break $ rf };
+            let cell = buf.get_cell(x, y);
+            if cell.@ch == ch && cell.@style.@reverse {
+                break $ true
+            } else { continue $ (rf, x + 1) }
+        ));
+        continue $ (found || row_found, y + 1)
+    ))
+);
+
+// True iff every non-blank cell whose grapheme matches one of `chars`
+// has `reverse = true`.
+_all_cells_in_set_reversed : Array String -> Buffer -> Bool;
+_all_cells_in_set_reversed = |chars, buf| (
+    let w = buf.@width;
+    let h = buf.@height;
+    let in_set = |c| chars.to_iter.fold(false, |s, acc| acc || s == c);
+    loop((true, 0), |(ok, y)| (
+        if !ok || y >= h { break $ ok };
+        let row_ok = loop((true, 0), |(rok, x)| (
+            if !rok || x >= w { break $ rok };
+            let cell = buf.get_cell(x, y);
+            if cell.@ch != "" && cell.@ch != " " && in_set(cell.@ch) {
+                if !cell.@style.@reverse { break $ false }
+                else { continue $ (rok, x + 1) }
+            } else { continue $ (rok, x + 1) }
+        ));
+        continue $ (ok && row_ok, y + 1)
+    ))
+);
+
+// Count cells whose grapheme is `ch` and whose style has `reverse = true`.
+_count_reverse_cells_with : String -> Buffer -> I64;
+_count_reverse_cells_with = |ch, buf| (
+    let w = buf.@width;
+    let h = buf.@height;
+    loop((0, 0), |(acc, y)| (
+        if y >= h { break $ acc };
+        let row_count = loop((0, 0), |(rc, x)| (
+            if x >= w { break $ rc };
+            let cell = buf.get_cell(x, y);
+            let bump = if cell.@ch == ch && cell.@style.@reverse { 1 } else { 0 };
+            continue $ (rc + bump, x + 1)
+        ));
+        continue $ (acc + row_count, y + 1)
+    ))
+);
+
+// Selected link gets the overlay; other links do not.
+run_selected_link_overlay : IO ();
+run_selected_link_overlay = (
+    let src = "[XYZ](http://a) sep [MNO](http://b)\n";
+    let opts = RenderOptions::default.set_selected_link(Option::some(1));
+    let buf = _render_to_buffer(src, opts, 60, 3);
+    // Letters of "MNO" should all be reverse-styled (selected).
+    let mno_reversed = _all_cells_in_set_reversed(["M", "N", "O"], buf);
+    assert_eq(|_| "selected link cells carry reverse=true",
+        mno_reversed, true);;
+    // Letters of "XYZ" should NOT be reverse-styled.
+    let any_xyz_reversed =
+        _any_reverse_cell_with("X", buf)
+        || _any_reverse_cell_with("Y", buf)
+        || _any_reverse_cell_with("Z", buf);
+    assert_eq(|_| "non-selected link cells have reverse=false",
+        any_xyz_reversed, false)
+);
+
+// `selected_link = none` produces no highlight anywhere.
+run_none_no_highlight : IO ();
+run_none_no_highlight = (
+    let src = "[XYZ](http://a) sep [MNO](http://b)\n";
+    let opts = RenderOptions::default;  // default: selected_link = none
+    let buf = _render_to_buffer(src, opts, 60, 3);
+    let any_reversed =
+        _any_reverse_cell_with("X", buf)
+        || _any_reverse_cell_with("Y", buf)
+        || _any_reverse_cell_with("Z", buf)
+        || _any_reverse_cell_with("M", buf)
+        || _any_reverse_cell_with("N", buf)
+        || _any_reverse_cell_with("O", buf);
+    assert_eq(|_| "selected_link=none → no reverse cells", any_reversed, false)
+);
+
+// Out-of-range index degrades silently to `none`: byte-identical output.
+run_out_of_range_degrades : IO ();
+run_out_of_range_degrades = (
+    let src = "[XYZ](http://a)\n";  // one link total
+    let opts_none = RenderOptions::default;
+    let opts_oor = RenderOptions::default.set_selected_link(Option::some(5));
+    let buf_none = _render_to_buffer(src, opts_none, 30, 2);
+    let buf_oor = _render_to_buffer(src, opts_oor, 30, 2);
+    // Compare each cell: ch and reverse flag must match.
+    let w = buf_none.@width;
+    let h = buf_none.@height;
+    let identical = loop((true, 0), |(ok, y)| (
+        if !ok || y >= h { break $ ok };
+        let row_ok = loop((true, 0), |(rok, x)| (
+            if !rok || x >= w { break $ rok };
+            let a = buf_none.get_cell(x, y);
+            let b = buf_oor.get_cell(x, y);
+            if a.@ch == b.@ch && a.@style.@reverse == b.@style.@reverse {
+                continue $ (rok, x + 1)
+            } else { break $ false }
+        ));
+        continue $ (ok && row_ok, y + 1)
+    ));
+    assert_eq(|_| "out-of-range selected_link == none rendering",
+        identical, true)
+);
+
+// `some(0)` highlights the link whose URL matches `collect_links(doc).@(0).@url`.
+run_index_zero_first_link : IO ();
+run_index_zero_first_link = (
+    let src = "[XYZ](http://a) sep [MNO](http://b)\n";
+    let doc = Parser::parse(src);
+    let links = collect_links(doc);
+    let first_url = links.@(0).@url;
+    assert_eq(|_| "collect_links order: first is 'http://a'", first_url, "http://a");;
+    let opts = RenderOptions::default.set_selected_link(Option::some(0));
+    let buf = _render_to_buffer(src, opts, 60, 3);
+    let xyz_reversed = _all_cells_in_set_reversed(["X", "Y", "Z"], buf);
+    assert_eq(|_| "some(0) highlights the first link",
+        xyz_reversed, true);;
+    let any_mno_reversed =
+        _any_reverse_cell_with("M", buf)
+        || _any_reverse_cell_with("N", buf)
+        || _any_reverse_cell_with("O", buf);
+    assert_eq(|_| "some(0) does NOT highlight the second link",
+        any_mno_reversed, false)
+);
+
+// Multi-row wrapped link: every cell of the link's content on every
+// row should carry the reverse overlay.
+run_wrapped_link_all_rows_overlaid : IO ();
+run_wrapped_link_all_rows_overlaid = (
+    // Width 8 forces "hello world goodbye" to wrap into multiple rows.
+    let src = "[hello world goodbye](http://a)\n";
+    let opts = RenderOptions::default.set_selected_link(Option::some(0));
+    let buf = _render_to_buffer(src, opts, 8, 6);
+    // The link's content uses letters h, e, l, o, w, r, d, g, b, y.
+    // Spaces between words shouldn't carry reverse — only the word
+    // content. Verify each link-content letter cell is reverse=true.
+    let letters = ["h", "e", "l", "o", "w", "r", "d", "g", "b", "y"];
+    let all_reversed = _all_cells_in_set_reversed(letters, buf);
+    assert_eq(|_| "every link-content cell across rows is reverse=true",
+        all_reversed, true);;
+    // Sanity: we actually saw at least a handful of reverse cells
+    // (otherwise the test is vacuous).
+    let h_count = _count_reverse_cells_with("h", buf);
+    assert_eq(|_| "at least one 'h' cell is highlighted", h_count >= 1, true)
+);
+
+run : IO ();
+run = (
+    run_selected_link_overlay;;
+    run_none_no_highlight;;
+    run_out_of_range_degrades;;
+    run_index_zero_first_link;;
+    run_wrapped_link_all_rows_overlaid;;
+    println("SelectedLinkTest: selected-link rendering OK")
+);

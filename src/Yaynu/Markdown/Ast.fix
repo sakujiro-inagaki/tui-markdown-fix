@@ -1,0 +1,242 @@
+// AST for parsed GFM documents.
+//
+// The shapes here are the canonical contract between `Yaynu.Markdown.Parser`
+// (writes) and `Yaynu.Markdown.Render` (reads). Adding a new block or inline
+// element is a deliberate compile-time signal — every `match` on `Block` or
+// `Inline` in the renderer becomes non-exhaustive and must be updated.
+//
+// See `openspec/changes/yaynu-markdown-view/specs/markdown-ast/spec.md` for
+// the requirements and per-constructor scenarios.
+module Yaynu.Markdown.Ast;
+
+// Table column alignment from the GFM delimiter row.
+//
+// `none` is the absence of an alignment marker (`---`) and is distinct from
+// `left` (which carries the explicit `:---` marker). Renderers MAY treat
+// `none` as equivalent to `left`; the AST keeps them separate so the parser
+// is lossless.
+type Alignment = union {
+    left   : (),
+    center : (),
+    right  : (),
+    none   : ()
+};
+
+// Inline (intra-paragraph) markdown elements.
+//
+// Each recursive constructor (`emph`, `strong`, `strikethrough`, `link`)
+// holds an `Array Inline` so nesting is preserved. Unmatched delimiters in
+// the source degrade to `text` — the AST never contains "half-open" runs.
+//
+// `link` carries `(display, url)`; `image` carries `(alt, url)` — alt is
+// plain text, not parsed as inline content (v0.1 limitation).
+type Inline = box union {
+    text          : String,
+    emph          : Array Inline,
+    strong        : Array Inline,
+    strikethrough : Array Inline,
+    code          : String,
+    link          : (Array Inline, String),
+    image         : (String, String),
+    line_break    : (),
+    raw_html      : String
+};
+
+// A code block — either fenced (` ``` ` / `~~~`, possibly with a language
+// info string) or indented (4-space prefix, never carries a language).
+//
+// `content` preserves internal newlines verbatim; the parser does not strip
+// or normalize them beyond removing the enclosing fence/indent.
+type CodeBlock = box struct {
+    language : Option String,
+    content  : String
+};
+
+// A GFM pipe table.
+//
+// Invariants the parser guarantees (and renderers may rely on):
+// - `alignments.length == headers.length`
+// - every row in `rows` has the same length as `headers`
+//   (shorter rows are right-padded with empty cells; longer rows are
+//    truncated)
+type Table = box struct {
+    headers    : Array (Array Inline),
+    alignments : Array Alignment,
+    rows       : Array (Array (Array Inline))
+};
+
+// One entry in a `MarkdownList`.
+//
+// `task` distinguishes the three GFM list-item shapes:
+// - `none()`         : plain bullet (`- item`)
+// - `some(false)`    : unchecked task (`- [ ] item`)
+// - `some(true)`     : checked task (`- [x] item` / `- [X] item`)
+//
+// `blocks` is the item's body — usually a single `paragraph`, but a list
+// item can contain multiple blocks (e.g. a paragraph followed by a nested
+// list, or a code block).
+type ListItem = box struct {
+    task   : Option Bool,
+    blocks : Array Block
+};
+
+// An ordered or unordered list.
+//
+// `start` is the first-item index for ordered lists (so `3.` → `start = 3`);
+// for unordered lists, `start` is unspecified and renderers must ignore it.
+//
+// `tight` records whether the source had any blank line between items:
+// `false` (loose) → renderer separates items with a blank row; `true`
+// (tight) → no blank row. Set by the block-parser pass.
+type MarkdownList = box struct {
+    ordered : Bool,
+    start   : I64,
+    tight   : Bool,
+    items   : Array ListItem
+};
+
+// Top-level block-level markdown element.
+//
+// `heading` payload is `(level, content)` where `level` ∈ [1, 6].
+// `blockquote` is recursive — `> > > x` produces three nested `blockquote`
+// constructors. `html_block` is the verbatim source (no HTML parsing in
+// v0.1; renderers display it as preformatted text).
+type Block = box union {
+    paragraph      : Array Inline,
+    heading        : (I64, Array Inline),
+    code_block     : CodeBlock,
+    blockquote     : Array Block,
+    list           : MarkdownList,
+    table          : Table,
+    thematic_break : (),
+    html_block     : String
+};
+
+// A parsed markdown document: an ordered sequence of top-level blocks.
+//
+// Block order matches source order top-to-bottom. An empty document has
+// `blocks.length == 0`.
+type Document = box struct {
+    blocks : Array Block
+};
+
+// Plain-text projection of an inline sequence — styles are discarded,
+// soft breaks become spaces, hard breaks become a single space, images
+// become `[image: alt]`, links render their display text only (URL
+// discarded). Used by the table renderer for cell-width measurement
+// and by `collect_links` to flatten link display text.
+//
+// Lives here (rather than in `Render/Inline`) so this AST module — and
+// the link-enumeration query below — can use it without a reverse
+// `Render → Ast` import.
+inlines_plain_text : Array Inline -> String;
+inlines_plain_text = |xs| xs.to_iter.fold("", |x, acc| acc + _inline_plain(x));
+
+_inline_plain : Inline -> String;
+_inline_plain = |i| (
+    match i {
+        text(s)            => s,
+        emph(kids)         => inlines_plain_text(kids),
+        strong(kids)       => inlines_plain_text(kids),
+        strikethrough(kids) => inlines_plain_text(kids),
+        code(s)            => s,
+        link((kids, _))    => inlines_plain_text(kids),
+        image((alt, _))    => "[image: " + alt + "]",
+        line_break()       => " ",
+        raw_html(s)        => s
+    }
+);
+
+// One enumerated link in the document.
+//
+// `index` is the link's source-DFS position (0-based) and equals its
+// position in the array returned by `collect_links`.
+// `url` is the URL captured by the parser, verbatim.
+// `display_text` is the link's `kids` flattened via
+// `inlines_plain_text` — the same projection the table renderer uses.
+type LinkInfo = box struct {
+    index        : I64,
+    url          : String,
+    display_text : String
+};
+
+// Enumerate every `Inline::link` in `doc` in source depth-first order.
+//
+// Traversal mirrors the contract shared with the renderer's link
+// counter (see `markdown-link-enumeration` spec / design D1):
+//   - blocks left-to-right;
+//   - inlines left-to-right within each block;
+//   - container inlines (`emph` / `strong` / `strikethrough` / `link`)
+//     recurse into their kids BEFORE advancing to the next sibling, so
+//     a link nested inside emphasis (or another link) gets its own,
+//     later index;
+//   - container blocks (`blockquote` inner, list-item inner, table
+//     headers + body rows + cells) recurse using the same rules;
+//   - `image` inlines never contribute.
+//
+// Invariant: `collect_links(doc).@(i).@index == i` for every valid `i`.
+collect_links : Document -> Array LinkInfo;
+collect_links = |doc| _collect_blocks(doc.@blocks, []);
+
+// Count the number of links inside an `Array Inline` subtree using the
+// same DFS contract as `collect_links`. Used by the table renderer to
+// advance the global link counter past links inside cells without
+// having to tokenize them (table cells render as plain text).
+count_links_in_inlines : Array Inline -> I64;
+count_links_in_inlines = |xs| _collect_inlines(xs, []).get_size;
+
+_collect_blocks : Array Block -> Array LinkInfo -> Array LinkInfo;
+_collect_blocks = |blocks, acc| (
+    blocks.to_iter.fold(acc, |b, a| _collect_block(b, a))
+);
+
+_collect_block : Block -> Array LinkInfo -> Array LinkInfo;
+_collect_block = |b, acc| (
+    match b {
+        paragraph(inlines)  => _collect_inlines(inlines, acc),
+        heading((_, ins))   => _collect_inlines(ins, acc),
+        code_block(_)       => acc,
+        blockquote(inner)   => _collect_blocks(inner, acc),
+        list(lst)           => lst.@items.to_iter.fold(acc, |item, a| (
+            _collect_blocks(item.@blocks, a)
+        )),
+        table(tbl)          => (
+            let acc1 = tbl.@headers.to_iter.fold(acc, |cell, a| (
+                _collect_inlines(cell, a)
+            ));
+            tbl.@rows.to_iter.fold(acc1, |row, a| (
+                row.to_iter.fold(a, |cell, a2| _collect_inlines(cell, a2))
+            ))
+        ),
+        thematic_break()    => acc,
+        html_block(_)       => acc
+    }
+);
+
+_collect_inlines : Array Inline -> Array LinkInfo -> Array LinkInfo;
+_collect_inlines = |xs, acc| (
+    xs.to_iter.fold(acc, |x, a| _collect_inline(x, a))
+);
+
+_collect_inline : Inline -> Array LinkInfo -> Array LinkInfo;
+_collect_inline = |i, acc| (
+    match i {
+        text(_)             => acc,
+        emph(kids)          => _collect_inlines(kids, acc),
+        strong(kids)        => _collect_inlines(kids, acc),
+        strikethrough(kids) => _collect_inlines(kids, acc),
+        code(_)             => acc,
+        link((kids, url))   => (
+            let idx = acc.get_size;
+            let info = LinkInfo {
+                index        : idx,
+                url          : url,
+                display_text : inlines_plain_text(kids)
+            };
+            _collect_inlines(kids, acc.push_back(info))
+        ),
+        image(_)            => acc,
+        line_break()        => acc,
+        raw_html(_)         => acc
+    }
+);

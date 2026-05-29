@@ -1,0 +1,131 @@
+// Code block, blockquote, and thematic break rendering tests.
+// Covers the scenarios in specs/markdown-render/spec.md under
+// "Code-block rendering", "Blockquote rendering", and "Thematic break
+// rendering".
+module RenderBlockTest;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser;
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Style;
+import Yaynu.Markdown.Test;
+import Yaynu.Tui.Buffer;
+import Yaynu.Tui.Rect;
+
+_strip_trailing : String -> String;
+_strip_trailing = |s| (
+    let lines = s.split("\n").map(|line| (
+        let bs = line.get_bytes;
+        let raw = bs.get_size;
+        let nz = if raw > 0 && bs.@(raw - 1) == 0_U8 { raw - 1 } else { raw };
+        let len = loop(nz, |i| (
+            if i <= 0 { break $ 0 };
+            if bs.@(i - 1) == ' ' { continue $ i - 1 };
+            break $ i
+        ));
+        line.get_sub(0, len)
+    )).to_array;
+    let m = lines.get_size;
+    let last = loop(m, |i| (
+        if i <= 0 { break $ 0 };
+        if lines.@(i - 1) == "" { continue $ i - 1 };
+        break $ i
+    ));
+    Array::from_map(last, |i| lines.@(i)).to_iter.join("\n")
+);
+
+_render : RenderOptions -> String -> I64 -> I64 -> String;
+_render = |opts, src, w, h| (
+    _strip_trailing(Test::render_to_string(src, opts, w, h))
+);
+
+run_bordered_code_block_with_lang : IO ();
+run_bordered_code_block_with_lang = (
+    let opts = RenderOptions::default;
+    let src = "```python\nx = 1\n```";
+    let out = _render(opts, src, 20, 4);
+    // First row should contain "python" and "─".
+    let first_row = out.split("\n").to_array.@(0);
+    let has_python = first_row.find("python", 0).is_some;
+    let has_dash = first_row.find("─", 0).is_some;
+    assert_eq(|_| "bordered code block embeds language label", has_python, true);;
+    assert_eq(|_| "bordered code block uses ─ in top border", has_dash, true)
+);
+
+run_unbordered_code_block : IO ();
+run_unbordered_code_block = (
+    let opts = RenderOptions::default.set_code_block_border(false);
+    let src = "```\nx = 1\n```";
+    let out = _render(opts, src, 20, 3);
+    let has_box = out.find("┌", 0).is_some
+                  || out.find("│", 0).is_some
+                  || out.find("└", 0).is_some;
+    assert_eq(|_| "unbordered code block has no box glyphs", has_box, false);;
+    let has_body = out.find("x = 1", 0).is_some;
+    assert_eq(|_| "unbordered code block still emits body", has_body, true)
+);
+
+run_long_line_truncation : IO ();
+run_long_line_truncation = (
+    let opts = RenderOptions::default
+        .set_code_block_border(false)
+        .set_show_code_block_language(false);
+    // Long line that won't fit in inner width.
+    let src = "```\nabcdefghijklmnopqrstuvwxyz0123\n```";
+    let out = _render(opts, src, 10, 3);
+    // The body row should end with `…`
+    let body_row = out.split("\n").to_array.@(0);
+    let ends_ellipsis = body_row.find("…", 0).is_some;
+    assert_eq(|_| "long code line is truncated with …", ends_ellipsis, true)
+);
+
+run_blockquote_single_marker : IO ();
+run_blockquote_single_marker = (
+    let opts = RenderOptions::default;
+    let src = "> hello";
+    let out = _render(opts, src, 20, 2);
+    let first_row = out.split("\n").to_array.@(0);
+    let starts_with_bar = first_row.find("│", 0).map(|i| i == 0).as_some_or(false);
+    assert_eq(|_| "blockquote row begins with │", starts_with_bar, true)
+);
+
+run_blockquote_nested : IO ();
+run_blockquote_nested = (
+    let opts = RenderOptions::default;
+    let src = "> > inner";
+    let out = _render(opts, src, 20, 2);
+    let first_row = out.split("\n").to_array.@(0);
+    // Two │ markers at column 0 and 2.
+    let bar1 = first_row.find("│", 0);
+    let bar2 = match bar1 {
+        none() => Option::none(),
+        some(i) => first_row.find("│", i + 1)
+    };
+    assert_eq(|_| "nested blockquote produces two │ markers",
+        bar1.is_some && bar2.is_some, true)
+);
+
+run_thematic_break : IO ();
+run_thematic_break = (
+    let opts = RenderOptions::default;
+    let src = "---";
+    let out = _render(opts, src, 20, 1);
+    // Should be 20 copies of ─.
+    let expected = loop(("", 0), |(acc, i)| (
+        if i >= 20 { break $ acc };
+        continue $ (acc + "─", i + 1)
+    ));
+    assert_eq(|_| "thematic break fills row width", out, expected)
+);
+
+run : IO ();
+run = (
+    run_bordered_code_block_with_lang;;
+    run_unbordered_code_block;;
+    run_long_line_truncation;;
+    run_blockquote_single_marker;;
+    run_blockquote_nested;;
+    run_thematic_break;;
+    println("RenderBlockTest: block rendering OK")
+);

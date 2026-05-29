@@ -1,0 +1,324 @@
+// Table rendering. Produces `RenderedLine`s for a single `Table` block
+// at a target width. Width allocation is two-pass: first use intrinsic
+// widths if they fit, otherwise scale proportionally with a 3-column
+// minimum per cell.
+//
+// Cell content is rendered as styled spans (not wrapped to multiple
+// rows); cells whose intrinsic width exceeds the column allocation are
+// truncated with `…`.
+module Yaynu.Markdown.Render.Table;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Style;
+import Yaynu.Markdown.Render.Inline;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Tui.Style;
+import Yaynu.Tui.Width;
+
+// Glyph set used for one rendered border style.
+type BorderGlyphs = struct {
+    // Top, mid (separator), bottom row corner/junction glyphs.
+    // Layout for each: (left, mid_join, right, fill).
+    top      : (String, String, String, String),
+    mid      : (String, String, String, String),
+    bottom   : (String, String, String, String),
+    vertical : String
+};
+
+_glyphs_light : BorderGlyphs;
+_glyphs_light = BorderGlyphs {
+    top      : ("┌", "┬", "┐", "─"),
+    mid      : ("├", "┼", "┤", "─"),
+    bottom   : ("└", "┴", "┘", "─"),
+    vertical : "│"
+};
+
+_glyphs_heavy : BorderGlyphs;
+_glyphs_heavy = BorderGlyphs {
+    top      : ("┏", "┳", "┓", "━"),
+    mid      : ("┣", "╋", "┫", "━"),
+    bottom   : ("┗", "┻", "┛", "━"),
+    vertical : "┃"
+};
+
+_glyphs_ascii : BorderGlyphs;
+_glyphs_ascii = BorderGlyphs {
+    top      : ("+", "+", "+", "-"),
+    mid      : ("+", "+", "+", "-"),
+    bottom   : ("+", "+", "+", "-"),
+    vertical : "|"
+};
+
+// ----------------------------------------------------------------------
+// Width allocation.
+
+// Compute the column-width budget per column at the target render width.
+// Returns the per-column widths (one entry per column) such that the
+// sum + borders fits `width`. Empty result if no columns.
+_allocate_widths : I64 -> Array I64 -> Bool -> I64 -> Array I64;
+_allocate_widths = |n_cols, intrinsic, has_border, width| (
+    if n_cols == 0 { [] };
+    // Border overhead per row:
+    //   bordered : n_cols + 1 verticals
+    //   plain    : (n_cols - 1) single-space separators
+    let border_cols = if has_border { n_cols + 1 } else { n_cols - 1 };
+    let inner = width - border_cols;
+    if inner <= 0 {
+        Array::fill(n_cols, 0)
+    } else {
+        let total_intrinsic = intrinsic.to_iter.fold(0, |w, acc| acc + w);
+        if total_intrinsic <= inner {
+            // Everything fits — use intrinsic.
+            intrinsic
+        } else {
+            // Proportional scaling with 3-column minimum.
+            let min_per = if 3 * n_cols <= inner { 3 } else {
+                if inner / n_cols <= 0 { 1 } else { inner / n_cols }
+            };
+            let min_total = min_per * n_cols;
+            let pool = if inner > min_total { inner - min_total } else { 0 };
+            // Allocate extra in proportion to (intrinsic - min_per).
+            let surplus = Array::from_map(n_cols, |i| (
+                let v = intrinsic.@(i) - min_per;
+                if v < 0 { 0 } else { v }
+            ));
+            let surplus_total = surplus.to_iter.fold(0, |w, acc| acc + w);
+            let widths = Array::from_map(n_cols, |i| (
+                if surplus_total == 0 {
+                    min_per
+                } else {
+                    min_per + (pool * surplus.@(i)) / surplus_total
+                }
+            ));
+            // Distribute any rounding leftover into the largest
+            // surplus columns (one column at a time).
+            let used = widths.to_iter.fold(0, |w, acc| acc + w);
+            let leftover = inner - used;
+            if leftover <= 0 {
+                widths
+            } else {
+                _spread_leftover(widths, surplus, leftover)
+            }
+        }
+    }
+);
+
+// Add `leftover` units, one at a time, to the columns with the
+// greatest surplus (priority queue without sorting — linear scan).
+_spread_leftover : Array I64 -> Array I64 -> I64 -> Array I64;
+_spread_leftover = |widths, surplus, leftover| (
+    let n = widths.get_size;
+    loop((widths, leftover), |(ws, rem)| (
+        if rem <= 0 { break $ ws };
+        // Find argmax of surplus where ws is still incrementable.
+        let (bi, _bs, _bi2) = loop((-1, 0, 0), |(bi, bs, i)| (
+            if i >= n { break $ (bi, bs, i) };
+            let s = surplus.@(i);
+            if s > bs { continue $ (i, s, i + 1) }
+            else { continue $ (bi, bs, i + 1) }
+        ));
+        if bi < 0 { break $ ws };
+        continue $ (ws.set(bi, ws.@(bi) + 1), rem - 1)
+    ))
+);
+
+// ----------------------------------------------------------------------
+// Cell rendering.
+
+// Render one cell as a sequence of styled spans, padding/truncating to
+// fit the column's allocated width.
+//
+// Alignment: `left` / `none` left-aligns, `right` right-aligns,
+// `center` centers. Truncation appends `…`.
+_render_cell : Array Inline -> Style -> Alignment -> I64 -> (String, Style)
+               -> Array (String, Style);
+_render_cell = |inlines, base, align, col_w, _padding_style_unused| (
+    if col_w <= 0 { [] };
+    let plain = inlines_plain_text(inlines);
+    let plain_w = Width::string_width(plain);
+    let body = if plain_w <= col_w {
+        plain
+    } else {
+        Width::truncate_with_ellipsis(col_w, plain)
+    };
+    let body_w = Width::string_width(body);
+    let pad = col_w - body_w;
+    let (lpad, rpad) = match align {
+        left()   => (0, pad),
+        center() => (pad / 2, pad - pad / 2),
+        right()  => (pad, 0),
+        none()   => (0, pad)
+    };
+    let spans : Array (String, Style) = [];
+    let spans = if lpad > 0 { spans.push_back((_spaces(lpad), Style::default)) } else { spans };
+    let spans = spans.push_back((body, base));
+    let spans = if rpad > 0 { spans.push_back((_spaces(rpad), Style::default)) } else { spans };
+    spans
+);
+
+_spaces : I64 -> String;
+_spaces = |n| (
+    if n <= 0 { "" };
+    loop(("", 0), |(acc, i)| (
+        if i >= n { break $ acc };
+        continue $ (acc + " ", i + 1)
+    ))
+);
+
+// ----------------------------------------------------------------------
+// Public: render a single `Table` block as a sequence of styled rows.
+
+// Render a single `Table` block plus advance the global link counter
+// past every link enumerated inside the table's cells (headers
+// left-to-right, then body rows top-to-bottom left-to-right) so it
+// stays in sync with `Ast::collect_links`. Cells are still rendered as
+// plain text — the `selected_link` highlight is not visually applied
+// inside cells in v0.2, but the counter must still advance correctly
+// so later blocks line up.
+render_table_lines : Table -> RenderOptions -> I64 -> I64
+                     -> (Array (Array (String, Style)), I64);
+render_table_lines = |tbl, opts, width, start_idx| (
+    let palette = opts.@style;
+    let n_cols = tbl.@headers.get_size;
+    // Compute next_idx regardless of width/columns so the counter
+    // stays consistent even when the table renders nothing.
+    let header_links = tbl.@headers.to_iter.fold(0, |cell, acc| (
+        acc + count_links_in_inlines(cell)
+    ));
+    let body_links = tbl.@rows.to_iter.fold(0, |row, acc| (
+        acc + row.to_iter.fold(0, |cell, a| a + count_links_in_inlines(cell))
+    ));
+    let next_idx = start_idx + header_links + body_links;
+    if n_cols == 0 || width <= 0 { ([], next_idx) };
+
+    // Intrinsic widths: max(plain-text-width(header), max(plain-text-width(row[c])) for row in rows)
+    let intrinsic = Array::from_map(n_cols, |c| (
+        let hw = Width::string_width(inlines_plain_text(tbl.@headers.@(c)));
+        let rmax = tbl.@rows.to_iter.fold(0, |row, acc| (
+            if c >= row.get_size { acc } else {
+                let cw = Width::string_width(inlines_plain_text(row.@(c)));
+                if cw > acc { cw } else { acc }
+            }
+        ));
+        if hw > rmax { hw } else { rmax }
+    ));
+
+    let has_border = match opts.@table_border { none() => false, _ => true };
+    let widths = _allocate_widths(n_cols, intrinsic, has_border, width);
+
+    let alignments = tbl.@alignments;
+
+    let lines = match opts.@table_border {
+        none()  => _render_plain(tbl, widths, alignments, palette),
+        light() => _render_bordered(tbl, widths, alignments, palette, _glyphs_light),
+        heavy() => _render_bordered(tbl, widths, alignments, palette, _glyphs_heavy),
+        ascii() => _render_bordered(tbl, widths, alignments, palette, _glyphs_ascii)
+    };
+    (lines, next_idx)
+);
+
+// Borderless rendering: cells separated by a single space; no
+// header/body separator (the bold header style is the only visual
+// cue).
+_render_plain : Table -> Array I64 -> Array Alignment -> MarkdownStyle
+                -> Array (Array (String, Style));
+_render_plain = |tbl, widths, alignments, palette| (
+    let header_row = _render_data_row(tbl.@headers, widths, alignments, palette.@table_header,
+                                       ("", Style::default), false, _spaces(1));
+    let body_rows = tbl.@rows.to_iter.fold([], |row, acc| (
+        let padded = _pad_row_to(row, widths.get_size);
+        acc.push_back(_render_data_row(padded, widths, alignments, palette.@table_cell,
+                                        ("", Style::default), false, _spaces(1)))
+    ));
+    [header_row].append(body_rows)
+);
+
+// Bordered rendering: top border, header row, separator, body rows,
+// bottom border. The vertical bar `vertical` separates cells.
+_render_bordered : Table -> Array I64 -> Array Alignment -> MarkdownStyle -> BorderGlyphs
+                   -> Array (Array (String, Style));
+_render_bordered = |tbl, widths, alignments, palette, g| (
+    let border_style = palette.@table_border;
+    let v = g.@vertical;
+    let top    = _build_border_row(g.@top, widths, border_style);
+    let mid    = _build_border_row(g.@mid, widths, border_style);
+    let bottom = _build_border_row(g.@bottom, widths, border_style);
+    let header_row = _render_data_row(tbl.@headers, widths, alignments,
+                                       palette.@table_header,
+                                       (v, border_style), true, "");
+    let body_rows = tbl.@rows.to_iter.fold([], |row, acc| (
+        let padded = _pad_row_to(row, widths.get_size);
+        acc.push_back(_render_data_row(padded, widths, alignments,
+                                        palette.@table_cell,
+                                        (v, border_style), true, ""))
+    ));
+    let head = [top, header_row, mid];
+    head.append(body_rows).push_back(bottom)
+);
+
+// Render a horizontal border row out of (left, mid_join, right, fill)
+// glyphs, with `fill * widths[c]` between joins.
+_build_border_row : (String, String, String, String) -> Array I64 -> Style
+                    -> Array (String, Style);
+_build_border_row = |(left, mid_join, right, fill), widths, style| (
+    let n = widths.get_size;
+    if n == 0 { [] };
+    let s = loop((left, 0), |(acc, c)| (
+        if c >= n { break $ acc + right };
+        let fill_run = _repeat(fill, widths.@(c));
+        let acc2 = acc + fill_run;
+        let acc3 = if c < n - 1 { acc2 + mid_join } else { acc2 + right };
+        if c < n - 1 { continue $ (acc3, c + 1) } else { break $ acc3 }
+    ));
+    [(s, style)]
+);
+
+_render_data_row : Array (Array Inline) -> Array I64 -> Array Alignment -> Style
+                   -> (String, Style) -> Bool -> String
+                   -> Array (String, Style);
+_render_data_row = |cells, widths, alignments, base, separator, surround, fallback_sep| (
+    let n = widths.get_size;
+    if n == 0 { [] };
+    let init : Array (String, Style) = [];
+    let init = if surround { init.push_back(separator) } else { init };
+    let row = loop((init, 0), |(spans, c)| (
+        if c >= n { break $ spans };
+        let cell = if c < cells.get_size { cells.@(c) } else { [] };
+        let align = if c < alignments.get_size { alignments.@(c) } else { Alignment::left() };
+        let cell_spans = _render_cell(cell, base, align, widths.@(c), separator);
+        let spans2 = spans.append(cell_spans);
+        let spans3 = if c < n - 1 {
+            if surround { spans2.push_back(separator) }
+            else if fallback_sep != "" { spans2.push_back((fallback_sep, Style::default)) }
+            else { spans2 }
+        } else {
+            if surround { spans2.push_back(separator) } else { spans2 }
+        };
+        continue $ (spans3, c + 1)
+    ));
+    row
+);
+
+// Pad a row to `n` cells with empty inline content.
+_pad_row_to : Array (Array Inline) -> I64 -> Array (Array Inline);
+_pad_row_to = |row, n| (
+    let m = row.get_size;
+    if m >= n { row } else {
+        let pad : Array (Array Inline) = Array::fill(n - m, []);
+        row.append(pad)
+    }
+);
+
+// Repeat a grapheme cluster `n` times. Uses the cluster's width so a
+// width-2 glyph repeats `n / cluster_width` times (rounded down).
+_repeat : String -> I64 -> String;
+_repeat = |g, n| (
+    let cw = Width::string_width(g);
+    if cw <= 0 || n <= 0 { "" };
+    let reps = n / cw;
+    loop(("", 0), |(acc, i)| (
+        if i >= reps { break $ acc };
+        continue $ (acc + g, i + 1)
+    ))
+);
+

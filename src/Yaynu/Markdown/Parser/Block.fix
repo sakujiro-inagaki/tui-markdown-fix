@@ -1,0 +1,743 @@
+// Block-pass parser: turns a raw markdown `String` into `Array Block`.
+//
+// Strategy: split into lines (normalizing `\r\n`), then iterate lines with
+// a single dispatch over "what kind of block does this line open?". Each
+// block-type extractor consumes the run of lines it owns and returns the
+// next line index for the main loop to resume at.
+//
+// Inline content is handed off to `Yaynu.Markdown.Parser.Inline::parse`.
+// Recursive structures (blockquote bodies, list-item bodies) call
+// `parse_lines` again on their stripped inner lines.
+module Yaynu.Markdown.Parser.Block;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser.Inline;
+
+// --- public entry ------------------------------------------------------
+
+// Parse the source into a block sequence. Total: never panics.
+parse : String -> Array Block;
+parse = |src| parse_lines(_split_lines(src));
+
+// Parse from an already-split list of lines. Used by blockquote and list
+// recursion to avoid re-splitting the same string.
+parse_lines : Array String -> Array Block;
+parse_lines = |lines| (
+    let n = lines.get_size;
+    loop((0, []), |(i, acc)| (
+        if i >= n { break $ acc };
+        let line = lines.@(i);
+        // Blank lines never produce a block; they only act as separators.
+        if _is_blank(line) { continue $ (i + 1, acc) };
+
+        // ATX heading (cheap to test, dispatch first).
+        match _try_atx_heading(line) {
+            some(h) => continue $ (i + 1, acc.push_back(h)),
+            none()  => continue $ _dispatch(lines, i, n, acc)
+        }
+    ))
+);
+
+// Dispatch the non-heading branches. Split out so the main `loop` body
+// stays readable.
+_dispatch : Array String -> I64 -> I64 -> Array Block -> (I64, Array Block);
+_dispatch = |lines, i, n, acc| (
+    let line = lines.@(i);
+
+    // Thematic break.
+    if _is_thematic_break(line) {
+        (i + 1, acc.push_back(Block::thematic_break()))
+    }
+    // Fenced code block.
+    else { match _fence_marker(line) {
+        some((marker, fence_len, info)) => (
+            let (cb, next_i) = _take_fenced_code(lines, i + 1, n, marker, fence_len, info);
+            (next_i, acc.push_back(cb))
+        ),
+        none() => (
+            // Blockquote.
+            if _is_blockquote_line(line) {
+                let (bq, next_i) = _take_blockquote(lines, i, n);
+                (next_i, acc.push_back(bq))
+            }
+            // List item.
+            else { match _detect_list_marker(line) {
+                some(_) => (
+                    let (lst, next_i) = _take_list(lines, i, n);
+                    (next_i, acc.push_back(lst))
+                ),
+                none() => (
+                    // Indented code block.
+                    if _is_indented_code_line(line) {
+                        let (cb, next_i) = _take_indented_code(lines, i, n);
+                        (next_i, acc.push_back(cb))
+                    }
+                    // GFM table (header + delimiter row).
+                    else { match _try_take_table(lines, i, n) {
+                        some((tbl, next_i)) => (next_i, acc.push_back(tbl)),
+                        none() => (
+                            // HTML block (line starts with '<').
+                            if _looks_like_html_block(line) {
+                                let (hb, next_i) = _take_html_block(lines, i, n);
+                                (next_i, acc.push_back(hb))
+                            }
+                            // Paragraph: catch-all.
+                            else {
+                                let (p, next_i) = _take_paragraph(lines, i, n);
+                                (next_i, acc.push_back(p))
+                            }
+                        )
+                    } }
+                )
+            } }
+        )
+    } }
+);
+
+// --- line splitting and basic predicates -------------------------------
+
+// Split on `\n`, then strip trailing `\r` from each line (so `\r\n` is
+// treated as `\n`).
+_split_lines : String -> Array String;
+_split_lines = |src| (
+    src.split("\n").map(|line| (
+        let n = line.get_size;
+        if n > 0 && line.get_bytes.@(n - 1) == '\r' {
+            line.get_sub(0, n - 1)
+        } else {
+            line
+        }
+    )).to_array
+);
+
+_is_blank : String -> Bool;
+_is_blank = |line| line.strip_spaces.is_empty;
+
+// Count leading occurrences of `target` in `s`.
+_count_leading : U8 -> String -> I64;
+_count_leading = |target, s| (
+    let bytes = s.get_bytes;
+    let n = s.get_size;
+    loop(0, |i| (
+        if i >= n { break $ i };
+        if bytes.@(i) != target { break $ i };
+        continue $ i + 1
+    ))
+);
+
+_count_leading_spaces : String -> I64;
+_count_leading_spaces = |s| _count_leading(' ', s);
+
+// Drop up to `max` leading spaces from `s` (used for "up to 3 leading
+// spaces" rules on heading/fence/thematic-break).
+_strip_lead_spaces_up_to : I64 -> String -> String;
+_strip_lead_spaces_up_to = |max, s| (
+    let lead = _count_leading_spaces(s);
+    let drop = if lead < max { lead } else { max };
+    s.get_sub(drop, s.get_size)
+);
+
+// --- ATX heading -------------------------------------------------------
+
+// Try to interpret `line` as an ATX heading. Honors:
+//   * up to 3 leading spaces
+//   * 1..=6 leading `#`s
+//   * a space (or end-of-line) must follow the `#` run
+//   * 7+ `#`s → not a heading
+_try_atx_heading : String -> Option Block;
+_try_atx_heading = |line| (
+    let lead = _count_leading_spaces(line);
+    if lead > 3 { Option::none() }
+    else {
+        let trimmed = line.get_sub(lead, line.get_size);
+        let hashes = _count_leading('#', trimmed);
+        if hashes < 1 || hashes > 6 { Option::none() }
+        else if hashes == trimmed.get_size {
+            // `###` with nothing after.
+            Option::some(Block::heading((hashes, [])))
+        }
+        else {
+            let after = trimmed.get_sub(hashes, trimmed.get_size);
+            // Must have a space separator before content.
+            if !after.starts_with(" ") { Option::none() }
+            else {
+                let content = after.strip_spaces;
+                Option::some(Block::heading((hashes, Inline::parse(content))))
+            }
+        }
+    }
+);
+
+// --- thematic break ----------------------------------------------------
+
+// `---`, `***`, `___` — 3+ of the same char, allowing internal spaces,
+// up to 3 leading spaces.
+_is_thematic_break : String -> Bool;
+_is_thematic_break = |line| (
+    let lead = _count_leading_spaces(line);
+    if lead > 3 { false }
+    else {
+        let trimmed = line.get_sub(lead, line.get_size);
+        let first_b = trimmed.get_first_byte;
+        match first_b {
+            none() => false,
+            some(b) => (
+                if b != '-' && b != '*' && b != '_' { false }
+                else {
+                    let bytes = trimmed.get_bytes;
+                    let n = trimmed.get_size;
+                    let (count, ok) = loop((0, 0, true), |(i, count, ok)| (
+                        if !ok { break $ (count, false) };
+                        if i >= n { break $ (count, true) };
+                        let c = bytes.@(i);
+                        if c == b      { continue $ (i + 1, count + 1, true) }
+                        else { if c == ' ' || c == '\t' { continue $ (i + 1, count, true) }
+                        else { break $ (count, false) } }
+                    ));
+                    ok && count >= 3
+                }
+            )
+        }
+    }
+);
+
+// --- fenced code -------------------------------------------------------
+
+// Detect a fence-open line. Returns `(marker_byte, fence_length, info_str)`.
+_fence_marker : String -> Option (U8, I64, String);
+_fence_marker = |line| (
+    let lead = _count_leading_spaces(line);
+    if lead > 3 { Option::none() }
+    else {
+        let trimmed = line.get_sub(lead, line.get_size);
+        let first_b = trimmed.get_first_byte;
+        match first_b {
+            none() => Option::none(),
+            some(b) => (
+                if b != '`' && b != '~' { Option::none() }
+                else {
+                    let count = _count_leading(b, trimmed);
+                    if count < 3 { Option::none() }
+                    else {
+                        let after = trimmed.get_sub(count, trimmed.get_size);
+                        let info = after.strip_spaces;
+                        Option::some((b, count, info))
+                    }
+                }
+            )
+        }
+    }
+);
+
+// `i` is the first line index AFTER the opening fence.
+_take_fenced_code : Array String -> I64 -> I64 -> U8 -> I64 -> String -> (Block, I64);
+_take_fenced_code = |lines, i, n, marker, fence_len, info| (
+    // Find closing fence (≥ fence_len of `marker`, after up-to-3 leading
+    // spaces, nothing else on the line) or run to EOF.
+    let (content_lines, next_i) = loop((i, []), |(k, acc)| (
+        if k >= n { break $ (acc, k) };
+        let line = lines.@(k);
+        if _is_closing_fence(line, marker, fence_len) {
+            break $ (acc, k + 1)
+        };
+        continue $ (k + 1, acc.push_back(line))
+    ));
+    let content = content_lines.to_iter.join("\n");
+    let lang = if info.is_empty { Option::none() } else { Option::some(info) };
+    (Block::code_block(CodeBlock { language: lang, content: content }), next_i)
+);
+
+_is_closing_fence : String -> U8 -> I64 -> Bool;
+_is_closing_fence = |line, marker, opening_len| (
+    let lead = _count_leading_spaces(line);
+    if lead > 3 { false }
+    else {
+        let trimmed = line.get_sub(lead, line.get_size);
+        let count = _count_leading(marker, trimmed);
+        if count < opening_len { false }
+        else {
+            // Nothing but spaces after the fence run.
+            let after = trimmed.get_sub(count, trimmed.get_size);
+            after.strip_spaces.is_empty
+        }
+    }
+);
+
+// --- indented code block ----------------------------------------------
+
+_is_indented_code_line : String -> Bool;
+_is_indented_code_line = |line| (
+    if _is_blank(line) { false }
+    else {
+        let bytes = line.get_bytes;
+        let n = line.get_size;
+        n >= 4 && bytes.@(0) == ' ' && bytes.@(1) == ' ' &&
+        bytes.@(2) == ' ' && bytes.@(3) == ' '
+    }
+);
+
+_take_indented_code : Array String -> I64 -> I64 -> (Block, I64);
+_take_indented_code = |lines, i, n| (
+    let (collected, next_i) = loop((i, []), |(k, acc)| (
+        if k >= n { break $ (acc, k) };
+        let line = lines.@(k);
+        if _is_indented_code_line(line) {
+            // Strip the first 4 spaces.
+            let stripped = line.get_sub(4, line.get_size);
+            continue $ (k + 1, acc.push_back(stripped))
+        };
+        // Blank lines within an indented code block: include them but
+        // only as part of an ongoing run (i.e. if the run continues).
+        // For simplicity v0.1 ends the block on any non-indented line.
+        break $ (acc, k)
+    ));
+    let content = collected.to_iter.join("\n");
+    (Block::code_block(CodeBlock {
+        language: Option::none(),
+        content: content
+    }), next_i)
+);
+
+// --- blockquote -------------------------------------------------------
+
+_is_blockquote_line : String -> Bool;
+_is_blockquote_line = |line| (
+    let lead = _count_leading_spaces(line);
+    if lead > 3 { false }
+    else {
+        let trimmed = line.get_sub(lead, line.get_size);
+        trimmed.starts_with(">")
+    }
+);
+
+// Strip one level of `>` (and the optional following space) from a
+// blockquote line. The caller has already confirmed `_is_blockquote_line`.
+_strip_blockquote_marker : String -> String;
+_strip_blockquote_marker = |line| (
+    let lead = _count_leading_spaces(line);
+    let trimmed = line.get_sub(lead, line.get_size);
+    // Drop the leading '>'.
+    let after_gt = trimmed.get_sub(1, trimmed.get_size);
+    // Drop one optional space.
+    if after_gt.starts_with(" ") {
+        after_gt.get_sub(1, after_gt.get_size)
+    } else {
+        after_gt
+    }
+);
+
+_take_blockquote : Array String -> I64 -> I64 -> (Block, I64);
+_take_blockquote = |lines, i, n| (
+    let (collected, next_i) = loop((i, []), |(k, acc)| (
+        if k >= n { break $ (acc, k) };
+        let line = lines.@(k);
+        if _is_blockquote_line(line) {
+            continue $ (k + 1, acc.push_back(_strip_blockquote_marker(line)))
+        };
+        break $ (acc, k)
+    ));
+    // Recursively parse the stripped inner lines.
+    let inner_blocks = parse_lines(collected);
+    (Block::blockquote(inner_blocks), next_i)
+);
+
+// --- lists ------------------------------------------------------------
+
+// Parsed list marker. `len` is the number of leading bytes consumed
+// (including the trailing space). For ordered lists `start_value` is
+// the numeric value of the prefix digits.
+type ListMarker = struct {
+    ordered     : Bool,
+    start_value : I64,
+    indent      : I64,  // leading-space count before the marker
+    len         : I64,  // bytes consumed by marker + trailing space
+    task        : Option Bool
+};
+
+// Detect a list marker at the start of `line`. Returns `none` if the
+// line is not a list item opener.
+_detect_list_marker : String -> Option ListMarker;
+_detect_list_marker = |line| (
+    let lead = _count_leading_spaces(line);
+    if lead > 3 { Option::none() }
+    else {
+        let trimmed = line.get_sub(lead, line.get_size);
+        let first = trimmed.get_first_byte;
+        match first {
+            none() => Option::none(),
+            some(b) => (
+                // Unordered: -, *, +
+                if (b == '-' || b == '*' || b == '+') &&
+                   (trimmed.get_size >= 2 && trimmed.get_bytes.@(1) == ' ') {
+                    let after_marker_start = lead + 2;
+                    let (task, body_start) = _detect_task_marker(line, after_marker_start);
+                    Option::some(ListMarker {
+                        ordered: false, start_value: 0, indent: lead,
+                        len: body_start - lead, task: task
+                    })
+                }
+                // Ordered: digit run + . or )
+                else { match _scan_ordered_marker(trimmed) {
+                    none() => Option::none(),
+                    some((num, marker_len)) => (
+                        let after_marker_start = lead + marker_len;
+                        let (task, body_start) = _detect_task_marker(line, after_marker_start);
+                        Option::some(ListMarker {
+                            ordered: true, start_value: num, indent: lead,
+                            len: body_start - lead, task: task
+                        })
+                    )
+                } }
+            )
+        }
+    }
+);
+
+// Try to parse `[N.] ` or `[N)] ` where N is a 1–9 digit run. Returns
+// `(N, total_bytes_including_trailing_space)`.
+_scan_ordered_marker : String -> Option (I64, I64);
+_scan_ordered_marker = |s| (
+    let bytes = s.get_bytes;
+    let n = s.get_size;
+    let digit_end = loop(0, |i| (
+        if i >= n { break $ i };
+        let b = bytes.@(i);
+        if b >= '0' && b <= '9' { continue $ i + 1 } else { break $ i }
+    ));
+    if digit_end == 0 || digit_end > 9 { Option::none() }
+    else { if digit_end + 1 >= n { Option::none() }
+    else {
+        let punct = bytes.@(digit_end);
+        if punct != '.' && punct != ')' { Option::none() }
+        else { if bytes.@(digit_end + 1) != ' ' { Option::none() }
+        else {
+            let num_str = s.get_sub(0, digit_end);
+            let num = num_str.from_string;
+            match num {
+                ok(v) => Option::some((v, digit_end + 2)),
+                err(_) => Option::none()
+            }
+        } }
+    } }
+);
+
+// After the list marker + space, check for `[ ] ` / `[x] ` / `[X] `.
+// Returns `(task_state, new_body_start_index)`.
+_detect_task_marker : String -> I64 -> (Option Bool, I64);
+_detect_task_marker = |line, pos| (
+    let bytes = line.get_bytes;
+    let n = line.get_size;
+    if pos + 3 > n { (Option::none(), pos) }
+    else { if bytes.@(pos) != '[' { (Option::none(), pos) }
+    else { if bytes.@(pos + 2) != ']' { (Option::none(), pos) }
+    else {
+        let inner = bytes.@(pos + 1);
+        let state = if inner == ' ' { Option::some(Option::some(false)) }
+                    else { if inner == 'x' || inner == 'X' { Option::some(Option::some(true)) }
+                    else { Option::none() } };
+        match state {
+            none() => (Option::none(), pos),
+            some(task) => (
+                // Optional trailing space after `]` before content.
+                let body_start = if pos + 3 < n && bytes.@(pos + 3) == ' ' {
+                    pos + 4
+                } else { pos + 3 };
+                (task, body_start)
+            )
+        }
+    } } }
+);
+
+// Take a contiguous list. Items of the same `ordered`-ness are grouped
+// into a single `MarkdownList`. Tight = no blank line between items.
+_take_list : Array String -> I64 -> I64 -> (Block, I64);
+_take_list = |lines, i, n| (
+    let first_marker = _detect_list_marker(lines.@(i)).as_some;
+    let ordered = first_marker.@ordered;
+    let start_value = first_marker.@start_value;
+
+    // Walk items.
+    let (items, tight, next_i) = loop((i, [], true), |(k, items, tight)| (
+        if k >= n { break $ (items, tight, k) };
+        let line = lines.@(k);
+
+        // Blank line might separate items (loose) or terminate the list.
+        if _is_blank(line) {
+            // Peek ahead to see if the next non-blank line continues the list.
+            let next_idx = _skip_blanks(lines, k + 1, n);
+            if next_idx >= n {
+                break $ (items, false, k + 1)
+            };
+            let next_marker = _detect_list_marker(lines.@(next_idx));
+            match next_marker {
+                none() => break $ (items, false, k + 1),
+                some(m) => (
+                    if m.@ordered != ordered {
+                        break $ (items, false, k + 1)
+                    };
+                    // Continue with the next item, mark loose.
+                    continue $ (next_idx, items, false)
+                )
+            }
+        };
+
+        match _detect_list_marker(line) {
+            none() => break $ (items, tight, k),
+            some(m) => (
+                if m.@ordered != ordered {
+                    break $ (items, tight, k)
+                };
+                let (item, after_k) = _take_list_item(lines, k, n, m);
+                continue $ (after_k, items.push_back(item), tight)
+            )
+        }
+    ));
+
+    let lst = MarkdownList {
+        ordered: ordered, start: start_value, tight: tight, items: items
+    };
+    (Block::list(lst), next_i)
+);
+
+_skip_blanks : Array String -> I64 -> I64 -> I64;
+_skip_blanks = |lines, start, n| (
+    loop(start, |k| (
+        if k >= n { break $ k };
+        if _is_blank(lines.@(k)) { continue $ k + 1 } else { break $ k }
+    ))
+);
+
+// Read a single list item starting at line `i` (which is known to match
+// `marker`). The item's content body lives at the position after the
+// marker on its first line. Continuation lines are those indented at
+// `marker.indent + marker.len` or deeper.
+_take_list_item : Array String -> I64 -> I64 -> ListMarker -> (ListItem, I64);
+_take_list_item = |lines, i, n, marker| (
+    let body_indent = marker.@indent + marker.@len;
+
+    // First line: take everything after the marker (already past the task
+    // checkbox if any).
+    let first_body = lines.@(i).get_sub(body_indent, lines.@(i).get_size);
+
+    // Collect continuation lines: lines that are blank, or indented at
+    // least `body_indent`.
+    let (cont_lines, next_i) = loop((i + 1, []), |(k, acc)| (
+        if k >= n { break $ (acc, k) };
+        let line = lines.@(k);
+        if _is_blank(line) {
+            // Blank line: include if the following line is also an
+            // indented continuation; otherwise stop.
+            let after = _skip_blanks(lines, k + 1, n);
+            if after >= n { break $ (acc, k) };
+            let next_line = lines.@(after);
+            let next_lead = _count_leading_spaces(next_line);
+            if next_lead >= body_indent && !_is_blank(next_line) {
+                // Include the blank line as an empty body line and keep going.
+                continue $ (k + 1, acc.push_back(""))
+            };
+            break $ (acc, k)
+        };
+        let lead = _count_leading_spaces(line);
+        if lead < body_indent {
+            // Outdented: end of this item.
+            break $ (acc, k)
+        };
+        // Strip the indent.
+        let stripped = line.get_sub(body_indent, line.get_size);
+        continue $ (k + 1, acc.push_back(stripped))
+    ));
+
+    // Build the body line array (first body + continuation lines).
+    let body_lines = [first_body].append(cont_lines);
+
+    // Recursively parse the item body as blocks.
+    let inner_blocks = parse_lines(body_lines);
+    (ListItem { task: marker.@task, blocks: inner_blocks }, next_i)
+);
+
+// --- GFM table --------------------------------------------------------
+
+_looks_like_table_header : String -> Bool;
+_looks_like_table_header = |line| line.find("|", 0).is_some && !_is_blank(line);
+
+// A delimiter row cell: optional `:`, run of `-`s (≥1), optional `:`,
+// surrounded by spaces. The full row is `|cell|cell|...|` with optional
+// leading/trailing `|`.
+_is_table_delimiter_row : String -> Bool;
+_is_table_delimiter_row = |line| (
+    let cells = _split_table_row(line);
+    if cells.get_size == 0 { false }
+    else {
+        cells.to_iter.fold(true, |c, acc|
+            acc && _is_delimiter_cell(c.strip_spaces)
+        )
+    }
+);
+
+_is_delimiter_cell : String -> Bool;
+_is_delimiter_cell = |c| (
+    let n = c.get_size;
+    if n == 0 { false }
+    else {
+        let bytes = c.get_bytes;
+        let (start, _) = (
+            if bytes.@(0) == ':' { (1, true) } else { (0, false) }
+        );
+        let end = if bytes.@(n - 1) == ':' { n - 1 } else { n };
+        if end <= start { false }
+        else {
+            // Middle must be all '-'.
+            let middle_ok = loop(start, |i| (
+                if i >= end { break $ true };
+                if bytes.@(i) != '-' { break $ false };
+                continue $ i + 1
+            ));
+            middle_ok && (end - start) >= 1
+        }
+    }
+);
+
+_cell_alignment : String -> Alignment;
+_cell_alignment = |c| (
+    let c = c.strip_spaces;
+    let starts_colon = c.starts_with(":");
+    let ends_colon = c.ends_with(":");
+    if starts_colon && ends_colon { Alignment::center() }
+    else { if starts_colon { Alignment::left() }
+    else { if ends_colon { Alignment::right() }
+    else { Alignment::none() } } }
+);
+
+// Split a table row into cells by `|`. Strips outer empty cells produced
+// by leading/trailing `|`.
+_split_table_row : String -> Array String;
+_split_table_row = |line| (
+    let trimmed = line.strip_spaces;
+    let n = trimmed.get_size;
+    if n == 0 { [] }
+    else {
+        let body = if trimmed.starts_with("|") { trimmed.get_sub(1, n) } else { trimmed };
+        let n2 = body.get_size;
+        let body = if body.ends_with("|") { body.get_sub(0, n2 - 1) } else { body };
+        body.split("|").to_array
+    }
+);
+
+_try_take_table : Array String -> I64 -> I64 -> Option (Block, I64);
+_try_take_table = |lines, i, n| (
+    if i + 1 >= n { Option::none() }
+    else { if !_looks_like_table_header(lines.@(i)) { Option::none() }
+    else { if !_is_table_delimiter_row(lines.@(i + 1)) { Option::none() }
+    else {
+        let header_cells = _split_table_row(lines.@(i));
+        let delim_cells = _split_table_row(lines.@(i + 1));
+        let col_count = header_cells.get_size;
+        if col_count == 0 { Option::none() }
+        else { if delim_cells.get_size != col_count { Option::none() }
+        else {
+            let headers = header_cells.to_iter.map(|c|
+                Inline::parse(c.strip_spaces)
+            ).to_array;
+            let alignments = delim_cells.to_iter.map(_cell_alignment).to_array;
+            // Body rows until blank line or non-`|` line.
+            let (rows, next_i) = loop((i + 2, []), |(k, acc)| (
+                if k >= n { break $ (acc, k) };
+                let line = lines.@(k);
+                if _is_blank(line) { break $ (acc, k) };
+                if line.find("|", 0).is_none { break $ (acc, k) };
+                let cells = _split_table_row(line);
+                // Pad / truncate to col_count.
+                let padded = Array::from_map(col_count, |c|
+                    if c < cells.get_size {
+                        Inline::parse(cells.@(c).strip_spaces)
+                    } else {
+                        []
+                    }
+                );
+                continue $ (k + 1, acc.push_back(padded))
+            ));
+            Option::some((Block::table(Table {
+                headers: headers, alignments: alignments, rows: rows
+            }), next_i))
+        } }
+    } } }
+);
+
+// --- HTML block --------------------------------------------------------
+
+_looks_like_html_block : String -> Bool;
+_looks_like_html_block = |line| (
+    let lead = _count_leading_spaces(line);
+    let trimmed = line.get_sub(lead, line.get_size);
+    trimmed.starts_with("<")
+);
+
+_take_html_block : Array String -> I64 -> I64 -> (Block, I64);
+_take_html_block = |lines, i, n| (
+    let (collected, next_i) = loop((i, []), |(k, acc)| (
+        if k >= n { break $ (acc, k) };
+        let line = lines.@(k);
+        if _is_blank(line) { break $ (acc, k) };
+        continue $ (k + 1, acc.push_back(line))
+    ));
+    let content = collected.to_iter.join("\n");
+    (Block::html_block(content), next_i)
+);
+
+// --- paragraph ---------------------------------------------------------
+
+// Detect if a line should terminate an open paragraph (without itself
+// consuming the line). Used by `_take_paragraph` to know where the
+// paragraph ends.
+_is_paragraph_terminator : String -> Bool;
+_is_paragraph_terminator = |line| (
+    _is_blank(line) ||
+    _try_atx_heading(line).is_some ||
+    _is_thematic_break(line) ||
+    _fence_marker(line).is_some ||
+    _is_blockquote_line(line) ||
+    _detect_list_marker(line).is_some ||
+    _looks_like_html_block(line)
+);
+
+// `>= 2 trailing spaces` before the (already-stripped) `\n` → hard break.
+_has_trailing_double_space : String -> Bool;
+_has_trailing_double_space = |line| (
+    let bytes = line.get_bytes;
+    let n = line.get_size;
+    n >= 2 && bytes.@(n - 1) == ' ' && bytes.@(n - 2) == ' '
+);
+
+_take_paragraph : Array String -> I64 -> I64 -> (Block, I64);
+_take_paragraph = |lines, i, n| (
+    // Collect consecutive paragraph lines.
+    let (collected, next_i) = loop((i, []), |(k, acc)| (
+        if k >= n { break $ (acc, k) };
+        let line = lines.@(k);
+        if k > i && _is_paragraph_terminator(line) {
+            break $ (acc, k)
+        };
+        // Special case: the first line of a paragraph cannot itself be a
+        // terminator (we wouldn't be in this branch), so just collect.
+        continue $ (k + 1, acc.push_back(line))
+    ));
+    // Build the inline stream with soft/hard breaks between lines.
+    let m = collected.get_size;
+    let inlines = loop((0, []), |(k, acc)| (
+        if k >= m { break $ acc };
+        let line = collected.@(k);
+        let hard = _has_trailing_double_space(line);
+        let trimmed = line.strip_last_spaces;
+        let line_inlines = Inline::parse(trimmed);
+        let acc = acc.append(line_inlines);
+        if k + 1 >= m { break $ acc };
+        let sep = if hard { Inline::line_break() } else { Inline::text(" ") };
+        continue $ (k + 1, acc.push_back(sep))
+    ));
+    (Block::paragraph(inlines), next_i)
+);
+
+// --- scaffold marker --------------------------------------------------
+
+scaffold_marker : ();
+scaffold_marker = ();

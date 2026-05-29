@@ -1,0 +1,181 @@
+// Style palette used by the markdown renderer.
+//
+// `MarkdownStyle` is a plain record: themes are data, not behaviour.
+// Callers may build their own by overriding individual fields on one of
+// the provided presets (`default`, `dark`, `monochrome`) via the
+// auto-generated `.set_*` setters.
+//
+// See `openspec/changes/yaynu-markdown-view/specs/markdown-render/spec.md`
+// for the per-field requirements (which inline / block constructor each
+// field styles).
+module Yaynu.Markdown.Style;
+
+import Yaynu.Term.Ansi;
+import Yaynu.Tui.Style;
+
+// All per-element styles the renderer consults.
+//
+// `heading` carries one `Style` per heading level (index 0 → level 1, ...
+// index 5 → level 6). The renderer reads `heading.@(level - 1)`. The
+// array MUST have length 6; presets enforce this. Out-of-range levels are
+// the parser's job to reject — the renderer trusts `level ∈ [1, 6]`.
+type MarkdownStyle = box struct {
+    // Base text style for paragraphs and any inline content without a
+    // more specific style.
+    text               : Style,
+    // Per-level heading style (length 6; indexed by `level - 1`).
+    heading            : Array Style,
+    // Body of fenced / indented code blocks.
+    code_block         : Style,
+    // The `│` (or chosen) marker prefix of a blockquote.
+    blockquote_marker  : Style,
+    // The body content inside a blockquote.
+    blockquote         : Style,
+    // The completed (`Some(true)`) task marker.
+    task_done          : Style,
+    // The pending (`Some(false)`) task marker.
+    task_pending       : Style,
+    // Header cells inside a `Table`.
+    table_header       : Style,
+    // Body cells inside a `Table`.
+    table_cell         : Style,
+    // Border glyphs for tables (and the code-block border, if drawn).
+    table_border       : Style,
+    // The repeating glyph for a `thematic_break` block.
+    thematic_break     : Style,
+    // The inline `strong` (`**...**`) style.
+    strong             : Style,
+    // The inline `emph` (`*...*`) style.
+    emph               : Style,
+    // The inline `strikethrough` (`~~...~~`) style.
+    strikethrough      : Style,
+    // The inline `code` (`` `...` ``) style.
+    inline_code        : Style,
+    // The display content of an inline `link`.
+    link               : Style,
+    // The synthesized `[image: alt]` text of an inline `image`.
+    image              : Style
+};
+
+namespace MarkdownStyle {
+
+    // Default preset: subtle styling that works on most light-or-dark
+    // terminals. Uses bold/italic/underline attributes plus a single
+    // accent color (cyan) for the link, since both light and dark
+    // schemes typically render cyan legibly.
+    default : MarkdownStyle;
+    default = (
+        let plain = Style::default;
+        let bold = plain.set_bold(true);
+        let italic = plain.set_italic(true);
+        let underline = plain.set_underline(true);
+        let dim = plain.set_dim(true);
+        let link_style = plain.with_fg(Color::named(Color16::cyan())).set_underline(true);
+        let code_style = plain.set_dim(true);
+        MarkdownStyle {
+            text              : plain,
+            heading           : [
+                bold,                                 // level 1
+                bold,                                 // level 2
+                bold,                                 // level 3
+                bold.set_italic(true),                // level 4
+                bold.set_italic(true),                // level 5
+                bold.set_italic(true).set_dim(true)   // level 6
+            ],
+            code_block        : code_style,
+            blockquote_marker : dim,
+            blockquote        : italic,
+            task_done         : plain.with_fg(Color::named(Color16::green())),
+            task_pending      : dim,
+            table_header      : bold,
+            table_cell        : plain,
+            table_border      : dim,
+            thematic_break    : dim,
+            strong            : bold,
+            emph              : italic,
+            strikethrough     : plain.set_dim(true),
+            inline_code       : code_style,
+            link              : link_style,
+            image             : italic
+        }
+    );
+
+    // High-contrast preset for dark terminal backgrounds. Bumps the
+    // accent palette into bright variants and uses bright_white for
+    // headings.
+    dark : MarkdownStyle;
+    dark = (
+        let plain = Style::default;
+        let bold = plain.set_bold(true);
+        let bright_white_fg = plain.with_fg(Color::named(Color16::bright_white())).set_bold(true);
+        let cyan = plain.with_fg(Color::named(Color16::bright_cyan())).set_underline(true);
+        let green = plain.with_fg(Color::named(Color16::bright_green()));
+        let yellow = plain.with_fg(Color::named(Color16::bright_yellow()));
+        let dim = plain.set_dim(true);
+        MarkdownStyle {
+            text              : plain,
+            heading           : [
+                bright_white_fg,
+                bright_white_fg,
+                bright_white_fg.set_italic(true),
+                bright_white_fg.set_italic(true),
+                bold.set_italic(true),
+                bold.set_italic(true).set_dim(true)
+            ],
+            code_block        : yellow,
+            blockquote_marker : cyan,
+            blockquote        : plain.set_italic(true),
+            task_done         : green,
+            task_pending      : dim,
+            table_header      : bright_white_fg,
+            table_cell        : plain,
+            table_border      : cyan.set_underline(false),
+            thematic_break    : dim,
+            strong            : bold,
+            emph              : plain.set_italic(true),
+            strikethrough     : dim,
+            inline_code       : yellow,
+            link              : cyan,
+            image             : plain.set_italic(true)
+        }
+    );
+
+    // Color-free preset: every field is `Style::default` plus one or
+    // more boolean attributes (`bold`, `italic`, `underline`,
+    // `reverse`). Suitable for screen-reader-friendly terminals or
+    // pipelines that can't display color.
+    monochrome : MarkdownStyle;
+    monochrome = (
+        let plain = Style::default;
+        let bold = plain.set_bold(true);
+        let italic = plain.set_italic(true);
+        let underline = plain.set_underline(true);
+        let reverse = plain.set_reverse(true);
+        MarkdownStyle {
+            text              : plain,
+            heading           : [
+                bold,
+                bold.set_underline(true),
+                bold,
+                bold.set_italic(true),
+                italic,
+                italic.set_dim(true)
+            ],
+            code_block        : reverse,
+            blockquote_marker : bold,
+            blockquote        : italic,
+            task_done         : bold,
+            task_pending      : italic,
+            table_header      : bold,
+            table_cell        : plain,
+            table_border      : bold,
+            thematic_break    : bold,
+            strong            : bold,
+            emph              : italic,
+            strikethrough     : plain.set_dim(true),
+            inline_code       : underline,
+            link              : underline,
+            image             : italic
+        }
+    );
+}

@@ -1,0 +1,57 @@
+[general]
+name = "tui-markdown"
+version = "0.2.0"
+fix_version = "*"
+description = "Markdown rendering pipeline for tui-fix (parses GFM, draws into a Buffer)."
+
+[build]
+files = [
+    "src/Yaynu/Markdown.fix",
+    "src/Yaynu/Markdown/Ast.fix",
+    "src/Yaynu/Markdown/Parser.fix",
+    "src/Yaynu/Markdown/Parser/Block.fix",
+    "src/Yaynu/Markdown/Parser/Inline.fix",
+    "src/Yaynu/Markdown/Style.fix",
+    "src/Yaynu/Markdown/Render.fix",
+    "src/Yaynu/Markdown/Render/Options.fix",
+    "src/Yaynu/Markdown/Render/Block.fix",
+    "src/Yaynu/Markdown/Render/Inline.fix",
+    "src/Yaynu/Markdown/Render/Table.fix",
+    "src/Yaynu/Markdown/Widget.fix",
+    "src/Yaynu/Markdown/Test.fix",
+]
+
+[build.test]
+files = [
+    "tests/YaynuMarkdownTest.fix",
+    "tests/YaynuMarkdownTest/AstTest.fix",
+    "tests/YaynuMarkdownTest/ParserInlineTest.fix",
+    "tests/YaynuMarkdownTest/ParserBlockTest.fix",
+    "tests/YaynuMarkdownTest/ParserTotalityTest.fix",
+    "tests/YaynuMarkdownTest/RenderParagraphTest.fix",
+    "tests/YaynuMarkdownTest/RenderBlockTest.fix",
+    "tests/YaynuMarkdownTest/RenderListTest.fix",
+    "tests/YaynuMarkdownTest/RenderTableTest.fix",
+    "tests/YaynuMarkdownTest/RenderInlineTest.fix",
+    "tests/YaynuMarkdownTest/WidgetTest.fix",
+    "tests/YaynuMarkdownTest/SnapshotTest.fix",
+    "tests/YaynuMarkdownTest/LinkEnumerationTest.fix",
+    "tests/YaynuMarkdownTest/SelectedLinkTest.fix",
+]
+
+## tui-fix and term-fix ship C shims that hold process-wide state
+## (ambiguous-width override, signal handlers). Fix does not propagate
+## a dependency's `static_links` / `library_paths` into the consumer
+## project, so we re-declare them here pointing at the installed
+## dep directories. If those deps are reinstalled at a different
+## version, update the paths below to match.
+static_links  = ["tui_shim", "term_shim"]
+library_paths = [
+    ".fixlang/deps/tui_0.2.0/c_src",
+    ".fixlang/deps/term_0.2.0/c_src"
+]
+
+[[dependencies]]
+name = "tui"
+version = "0.2.0"
+git = { url = "https://github.com/sakujiro-inagaki/tui-fix.git" }

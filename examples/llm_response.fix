@@ -1,0 +1,42 @@
+// llm_response.fix — render a representative LLM-style response to
+// stdout. Sourced from `tests/fixtures/snapshots/llm_response.md`
+// (duplicated inline here so the example is self-contained and
+// doesn't depend on a fixture path at runtime).
+//
+// Run:
+//   fix run -f examples/llm_response.fix \
+//     -s tui_shim -s term_shim \
+//     -L .fixlang/deps/tui_0.1.2/c_src \
+//     -L .fixlang/deps/term_0.1.0/c_src
+module Main;
+
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Test;
+
+_src : String;
+_src = (
+    "# Project Status\n\n"
+    + "Here is a *brief summary* of the current state.\n\n"
+    + "## Todo\n\n"
+    + "- Write more **tests**\n"
+    + "- Document the API\n"
+    + "- Ship v0.1\n\n"
+    + "## Snippet\n\n"
+    + "```python\n"
+    + "def add(a, b):\n"
+    + "    return a + b\n"
+    + "```\n\n"
+    + "## Numbers\n\n"
+    + "| Metric  | Value |\n"
+    + "|---------|-------|\n"
+    + "| Tests   |    42 |\n"
+    + "| Files   |    13 |\n\n"
+    + "See the [docs](https://example.com/docs) for details.\n"
+);
+
+main : IO ();
+main = (
+    let out = Test::render_to_string(_src, RenderOptions::default, 60, 30);
+    println(out)
+);

@@ -1,0 +1,40 @@
+// Public facade for the Yaynu.Markdown library.
+//
+// Fix has no syntactic "re-export" — `import` only brings symbols into the
+// importing module's scope, it does not republish them to downstream
+// importers. The facade therefore acts as **documentation** of the v0.1
+// public surface and as a single import that pulls every sub-module into
+// the type-checker (so the library compiles as a coherent whole). Consumers
+// still write `import Yaynu.Markdown.Ast;` etc. to bring the names they
+// actually use into their own scope.
+//
+// Public surface (v0.1 baseline):
+//
+// - `Yaynu.Markdown.Ast`     — `Document`, `Block`, `Inline`, `CodeBlock`,
+//                              `MarkdownList`, `ListItem`, `Table`,
+//                              `Alignment`.
+// - `Yaynu.Markdown.Parser`  — `parse : String -> Document`.
+// - `Yaynu.Markdown.Style`   — `MarkdownStyle`, presets (`default`,
+//                              `dark`, `monochrome`).
+// - `Yaynu.Markdown.Render`  — `render`, `render_string`,
+//                              `estimate_height`, `RenderOptions`,
+//                              `TableBorderStyle`.
+// - `Yaynu.Markdown.Widget`  — `MarkdownView`, `new`, `with_options`,
+//                              `with_scroll`, `total_height`, `render`,
+//                              `handle_key`.
+//
+// Internal sub-modules (`Parser.Block`, `Parser.Inline`, `Render.Block`,
+// `Render.Inline`, `Render.Table`) are implementation detail and may
+// change between v0.1 patch releases.
+module Yaynu.Markdown;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser;
+import Yaynu.Markdown.Style;
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Widget;
+
+// Library version string. Bumped per release per SemVer.
+version : String;
+version = "0.1.0";

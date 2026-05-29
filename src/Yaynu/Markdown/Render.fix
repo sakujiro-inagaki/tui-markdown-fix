@@ -1,0 +1,130 @@
+// Top-level renderer facade.
+//
+// Composes the per-block rendering (`Render.Block`) into the three
+// public functions documented in the markdown-render spec:
+//
+//   render          : Document -> RenderOptions -> Rect -> Buffer -> (I64, Buffer)
+//   render_string   : String   -> RenderOptions -> Rect -> Buffer -> (I64, Buffer)
+//   estimate_height : Document -> RenderOptions -> I64  -> I64
+//
+// `render` and `estimate_height` share the same `render_blocks` pass,
+// so the row count returned by render (clipped to `rect.height`) is
+// guaranteed to equal `min(estimate_height(...), rect.height)` — the
+// only "drift" between the two is the deliberate vertical clipping
+// inside the destination rect.
+//
+// `Yaynu.Markdown.Render` imports `Render/Options` so users only need
+// `import Yaynu.Markdown.Render;` to get `RenderOptions`,
+// `TableBorderStyle`, and `RenderOptions::default` into scope alongside
+// the entry points.
+module Yaynu.Markdown.Render;
+
+import Yaynu.Markdown.Ast;
+import Yaynu.Markdown.Parser;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Render.Block;
+import Yaynu.Tui.Buffer;
+import Yaynu.Tui.Rect;
+import Yaynu.Tui.Style;
+import Yaynu.Tui.Width;
+
+// Draw `doc` into `rect` of `buf` at the top-left and return
+// `(rows_written, updated_buf)`. Lines beyond `rect.height` are
+// silently clipped. Cells outside `rect` are not modified.
+render : Document -> RenderOptions -> Rect -> Buffer -> (I64, Buffer);
+render = |doc, opts, rect, buf| (
+    if rect.is_empty { (0, buf) };
+    let (lines, _next_idx) = render_blocks(doc.@blocks, opts, rect.@width, 0);
+    _blit_lines(lines, rect, buf)
+);
+
+// Convenience: `parse` then `render`.
+render_string : String -> RenderOptions -> Rect -> Buffer -> (I64, Buffer);
+render_string = |src, opts, rect, buf| render(Parser::parse(src), opts, rect, buf);
+
+// Compute the total number of rows the document would occupy if
+// rendered at `width` without vertical clipping. Always matches the
+// `render` row count for an `rect.height` large enough to fit.
+estimate_height : Document -> RenderOptions -> I64 -> I64;
+estimate_height = |doc, opts, width| (
+    let (lines, _next_idx) = render_blocks(doc.@blocks, opts, width, 0);
+    lines.get_size
+);
+
+// Source-DFS link enumeration paired with the row range of each link's
+// containing top-level block, as it would be laid out at `width`.
+//
+// `row_start` / `row_end` are 0-based pre-scroll row indices in the
+// fully-rendered document (matching what `Render::render` would
+// produce at `width`); callers compare against their own scroll offset
+// to decide which links fall inside the viewport.
+//
+// Granularity: a link's range is its containing top-level block
+// (paragraph / heading / blockquote / list / table / ...). If a single
+// block contains multiple links — common for paragraphs with several
+// inline links — they all get the same row range. Per-link sub-block
+// granularity would require running the inline wrapper and tracking
+// per-token positions, which the wrapper doesn't currently emit.
+//
+// `width <= 0` returns an empty array.
+link_block_rows : Document -> RenderOptions -> I64
+                  -> Array (LinkInfo, I64, I64);
+link_block_rows = |doc, opts, width| (
+    if width <= 0 { [] };
+    let all_links = collect_links(doc);
+    let blocks = doc.@blocks;
+    let n = blocks.get_size;
+    if n == 0 { [] };
+    let (result, _row, _link_idx, _i) = loop(([], 0, 0, 0), |(acc, row, link_idx, i)| (
+        if i >= n { break $ (acc, row, link_idx, i) };
+        let block = blocks.@(i);
+        let (block_lines, next_link_idx) = render_block(block, opts, width, link_idx);
+        let h = block_lines.get_size;
+        let row_start = row;
+        let row_end = if h <= 0 { row } else { row + h - 1 };
+        let acc2 = loop((acc, link_idx), |(a, k)| (
+            if k >= next_link_idx { break $ a };
+            continue $ (a.push_back((all_links.@(k), row_start, row_end)), k + 1)
+        ));
+        // Adjacent blocks are separated by a single blank row (see
+        // `render_blocks`'s acc.push_back([]).append(...) branch).
+        let next_row = row + h + 1;
+        continue $ (acc2, next_row, next_link_idx, i + 1)
+    ));
+    result
+);
+
+// ----------------------------------------------------------------------
+// Internal: write a rendered-line sequence into a `Buffer` rect.
+
+_blit_lines : Array (Array (String, Style)) -> Rect -> Buffer
+              -> (I64, Buffer);
+_blit_lines = |lines, rect, buf| (
+    let n = lines.get_size;
+    let h = if n > rect.@height { rect.@height } else { n };
+    let final_buf = loop((buf, 0), |(b, i)| (
+        if i >= h { break $ b };
+        let line = lines.@(i);
+        let b2 = _write_line(line, rect, i, b);
+        continue $ (b2, i + 1)
+    ));
+    (h, final_buf)
+);
+
+_write_line : Array (String, Style) -> Rect -> I64 -> Buffer -> Buffer;
+_write_line = |spans, rect, row, buf| (
+    let m = spans.get_size;
+    let (final_buf, _) = loop((buf, 0, 0), |(b, x_off, i)| (
+        if i >= m { break $ (b, x_off) };
+        let (text, style) = spans.@(i);
+        let w = Width::string_width(text);
+        let remaining = rect.@width - x_off;
+        if remaining <= 0 { break $ (b, x_off) };
+        let to_write = if w <= remaining { text } else { Width::truncate(remaining, text) };
+        // `set_string_clipped` uses rect-relative `(offset_x, offset_y)`
+        // and truncates anything overflowing the rect on the right.
+        let b2 = Buffer::set_string_clipped(rect, x_off, row, to_write, style, b);
+        continue $ (b2, x_off + Width::string_width(to_write), i + 1)
+    ));
+    final_buf
+);

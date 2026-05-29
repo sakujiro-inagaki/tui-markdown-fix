@@ -1,0 +1,57 @@
+// all_features.fix — dump a markdown snippet that exercises every
+// feature the v0.1 renderer supports, written as plain text to
+// stdout via `Test::render_to_string`.
+//
+// Run:
+//   fix run -f examples/all_features.fix \
+//     -s tui_shim -s term_shim \
+//     -L .fixlang/deps/tui_0.1.2/c_src \
+//     -L .fixlang/deps/term_0.1.0/c_src
+//
+// (The `-s` / `-L` flags are required because `fix run -f` does not
+// inherit `static_links` / `library_paths` from this project's
+// `fixproj.toml`. Update the path versions to match your installed
+// deps under `.fixlang/deps/`.)
+module Main;
+
+import Yaynu.Markdown.Render;
+import Yaynu.Markdown.Render.Options;
+import Yaynu.Markdown.Test;
+
+_src : String;
+_src = (
+    "# All Features\n\n"
+    + "Plain paragraph with **strong**, *emph*, ~~strike~~, and `inline_code`.\n\n"
+    + "## Headings\n\n"
+    + "### Sub heading\n\n"
+    + "Soft  \n"
+    + "break above (two-space line ending → hard break).\n\n"
+    + "> A blockquote with *emphasis* and a [link](https://example.com).\n"
+    + "> > Nested blockquote.\n\n"
+    + "---\n\n"
+    + "## Lists\n\n"
+    + "- bullet\n"
+    + "- second bullet\n"
+    + "  - nested\n\n"
+    + "1. ordered\n"
+    + "2. ordered too\n\n"
+    + "- [x] done task\n"
+    + "- [ ] pending task\n\n"
+    + "## Code\n\n"
+    + "```python\n"
+    + "def greet(name):\n"
+    + "    return f\"hello, {name}\"\n"
+    + "```\n\n"
+    + "## Table\n\n"
+    + "| Col A | Col B |\n"
+    + "|:-----:|------:|\n"
+    + "| left  |  right |\n"
+    + "| a     |     bb |\n\n"
+    + "An image: ![logo](logo.png)\n"
+);
+
+main : IO ();
+main = (
+    let out = Test::render_to_string(_src, RenderOptions::default, 60, 50);
+    println(out)
+);
