@@ -107,7 +107,7 @@ _allocate_widths = |n_cols, intrinsic, has_border, width| (
 // greatest surplus (priority queue without sorting — linear scan).
 _spread_leftover : Array I64 -> Array I64 -> I64 -> Array I64;
 _spread_leftover = |widths, surplus, leftover| (
-    let n = widths.get_size;
+    let n = widths.@size;
     loop((widths, leftover), |(ws, rem)| (
         if rem <= 0 { break $ ws };
         // Find argmax of surplus where ws is still incrementable.
@@ -179,7 +179,7 @@ render_table_lines : Table -> RenderOptions -> I64 -> I64
                      -> (Array (Array (String, Style)), I64);
 render_table_lines = |tbl, opts, width, start_idx| (
     let palette = opts.@style;
-    let n_cols = tbl.@headers.get_size;
+    let n_cols = tbl.@headers.@size;
     // Compute next_idx regardless of width/columns so the counter
     // stays consistent even when the table renders nothing.
     let header_links = tbl.@headers.to_iter.fold(0, |cell, acc| (
@@ -195,7 +195,7 @@ render_table_lines = |tbl, opts, width, start_idx| (
     let intrinsic = Array::from_map(n_cols, |c| (
         let hw = Width::string_width(inlines_plain_text(tbl.@headers.@(c)));
         let rmax = tbl.@rows.to_iter.fold(0, |row, acc| (
-            if c >= row.get_size { acc } else {
+            if c >= row.@size { acc } else {
                 let cw = Width::string_width(inlines_plain_text(row.@(c)));
                 if cw > acc { cw } else { acc }
             }
@@ -226,7 +226,7 @@ _render_plain = |tbl, widths, alignments, palette| (
     let header_row = _render_data_row(tbl.@headers, widths, alignments, palette.@table_header,
                                        ("", Style::default), false, _spaces(1));
     let body_rows = tbl.@rows.to_iter.fold([], |row, acc| (
-        let padded = _pad_row_to(row, widths.get_size);
+        let padded = _pad_row_to(row, widths.@size);
         acc.push_back(_render_data_row(padded, widths, alignments, palette.@table_cell,
                                         ("", Style::default), false, _spaces(1)))
     ));
@@ -247,7 +247,7 @@ _render_bordered = |tbl, widths, alignments, palette, g| (
                                        palette.@table_header,
                                        (v, border_style), true, "");
     let body_rows = tbl.@rows.to_iter.fold([], |row, acc| (
-        let padded = _pad_row_to(row, widths.get_size);
+        let padded = _pad_row_to(row, widths.@size);
         acc.push_back(_render_data_row(padded, widths, alignments,
                                         palette.@table_cell,
                                         (v, border_style), true, ""))
@@ -261,7 +261,7 @@ _render_bordered = |tbl, widths, alignments, palette, g| (
 _build_border_row : (String, String, String, String) -> Array I64 -> Style
                     -> Array (String, Style);
 _build_border_row = |(left, mid_join, right, fill), widths, style| (
-    let n = widths.get_size;
+    let n = widths.@size;
     if n == 0 { [] };
     let s = loop((left, 0), |(acc, c)| (
         if c >= n { break $ acc + right };
@@ -277,14 +277,14 @@ _render_data_row : Array (Array Inline) -> Array I64 -> Array Alignment -> Style
                    -> (String, Style) -> Bool -> String
                    -> Array (String, Style);
 _render_data_row = |cells, widths, alignments, base, separator, surround, fallback_sep| (
-    let n = widths.get_size;
+    let n = widths.@size;
     if n == 0 { [] };
     let init : Array (String, Style) = [];
     let init = if surround { init.push_back(separator) } else { init };
     let row = loop((init, 0), |(spans, c)| (
         if c >= n { break $ spans };
-        let cell = if c < cells.get_size { cells.@(c) } else { [] };
-        let align = if c < alignments.get_size { alignments.@(c) } else { Alignment::left() };
+        let cell = if c < cells.@size { cells.@(c) } else { [] };
+        let align = if c < alignments.@size { alignments.@(c) } else { Alignment::left() };
         let cell_spans = _render_cell(cell, base, align, widths.@(c), separator);
         let spans2 = spans.append(cell_spans);
         let spans3 = if c < n - 1 {
@@ -302,7 +302,7 @@ _render_data_row = |cells, widths, alignments, base, separator, surround, fallba
 // Pad a row to `n` cells with empty inline content.
 _pad_row_to : Array (Array Inline) -> I64 -> Array (Array Inline);
 _pad_row_to = |row, n| (
-    let m = row.get_size;
+    let m = row.@size;
     if m >= n { row } else {
         let pad : Array (Array Inline) = Array::fill(n - m, []);
         row.append(pad)

@@ -87,7 +87,7 @@ _show_doc = |d| d.@blocks.to_iter.map(_show_block).join("\n");
 run_empty : IO ();
 run_empty = (
     let d = Parser::parse("");
-    assert_eq(|_| "empty input → empty document", d.@blocks.get_size, 0)
+    assert_eq(|_| "empty input → empty document", d.@blocks.@size, 0)
 );
 
 run_plain_paragraph : IO ();

@@ -110,7 +110,7 @@ _run_fixture = |f| (
 _strip_trailing_nl : String -> String;
 _strip_trailing_nl = |s| (
     let bs = s.get_bytes;
-    let n = bs.get_size;
+    let n = bs.@size;
     // Strip trailing NUL (Fix `String` is C-string-backed) then newlines.
     let n2 = if n > 0 && bs.@(n - 1) == 0_U8 { n - 1 } else { n };
     let stop = loop(n2, |i| (
@@ -125,8 +125,8 @@ _print_diff : String -> String -> IO ();
 _print_diff = |expected, actual| (
     let exp_rows = expected.split("\n").to_array;
     let act_rows = actual.split("\n").to_array;
-    let n_e = exp_rows.get_size;
-    let n_a = act_rows.get_size;
+    let n_e = exp_rows.@size;
+    let n_a = act_rows.@size;
     let n = if n_e > n_a { n_e } else { n_a };
     loop_m(0, |i| (
         if i >= n { break_m $ () };
@@ -142,5 +142,5 @@ _print_diff = |expected, actual| (
 run : IO ();
 run = (
     _fixtures.to_iter.fold_m((), |f, _| _run_fixture(f));;
-    println("SnapshotTest: " + _fixtures.get_size.to_string + " fixtures verified")
+    println("SnapshotTest: " + _fixtures.@size.to_string + " fixtures verified")
 );

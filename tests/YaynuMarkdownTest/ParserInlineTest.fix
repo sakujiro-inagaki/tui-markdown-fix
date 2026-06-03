@@ -36,7 +36,7 @@ run_plain_text = (
     let got = parse("hello world");
     assert_eq(|_| "plain text → single text", _show_inlines(got), "t(hello world)");;
     let empty = parse("");
-    assert_eq(|_| "empty string → 0 inlines", empty.get_size, 0)
+    assert_eq(|_| "empty string → 0 inlines", empty.@size, 0)
 );
 
 // --- emph / strong / strikethrough ------------------------------------

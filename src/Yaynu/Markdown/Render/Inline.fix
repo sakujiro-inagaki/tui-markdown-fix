@@ -122,10 +122,10 @@ _inline_to_tokens = |i, base, opts, idx| (
 _tokenize_text : String -> Style -> Array InlineToken;
 _tokenize_text = |s, base| (
     let bytes = s.get_bytes;
-    let n = if bytes.get_size > 0 && bytes.@(bytes.get_size - 1) == 0_U8 {
-        bytes.get_size - 1
+    let n = if bytes.@size > 0 && bytes.@(bytes.@size - 1) == 0_U8 {
+        bytes.@size - 1
     } else {
-        bytes.get_size
+        bytes.@size
     };
     // Emit boundary `space` tokens verbatim — the wrap pass drops
     // them at row starts and collapses runs. Stripping leading /
@@ -150,7 +150,7 @@ _tokenize_text = |s, base| (
             // exists, overwrite it: the later style wins (it's the
             // one adjacent to the next word in source order).
             let toks3 = (
-                let m = toks2.get_size;
+                let m = toks2.@size;
                 if m > 0 {
                     let last = toks2.@(m - 1);
                     let is_space = match last { space(_) => true, _ => false };
@@ -197,7 +197,7 @@ _bytes_to_string = |bs| String::_unsafe_from_c_str(bs.push_back(0_U8));
 wrap_tokens : I64 -> Array InlineToken -> Array (Array (String, Style));
 wrap_tokens = |width, toks| (
     if width <= 0 { [] };
-    let n = toks.get_size;
+    let n = toks.@size;
     // State: (lines, cur, used, pending_sp_style)
     // `pending_sp_style` is `none` when no space is pending,
     // `some(style)` otherwise. The style is what will be applied
@@ -252,7 +252,7 @@ wrap_tokens = |width, toks| (
         }
     ));
     // Flush trailing line if non-empty.
-    if cur.get_size > 0 { lines.push_back(cur) } else { lines }
+    if cur.@size > 0 { lines.push_back(cur) } else { lines }
 );
 
 // Split a string into character-wrap chunks of at most `width`
@@ -261,7 +261,7 @@ _char_break : String -> Style -> I64 -> Array (Array (String, Style)) -> Array (
               -> (Array (Array (String, Style)), Array (String, Style), I64);
 _char_break = |text, style, width, lines, cur, used| (
     let clusters = Width::iter_graphemes(text).to_array;
-    let m = clusters.get_size;
+    let m = clusters.@size;
     loop((lines, cur, used, "", 0, 0), |(ls, cu, u, buf, buf_w, j)| (
         if j >= m {
             // Flush the trailing partial chunk into cur.

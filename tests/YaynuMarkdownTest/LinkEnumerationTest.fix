@@ -10,7 +10,7 @@ run_empty_document : IO ();
 run_empty_document = (
     let doc = Document { blocks : [] };
     let links = collect_links(doc);
-    assert_eq(|_| "empty document → empty link array", links.get_size, 0)
+    assert_eq(|_| "empty document → empty link array", links.@size, 0)
 );
 
 run_multiple_links_across_paragraphs : IO ();
@@ -18,7 +18,7 @@ run_multiple_links_across_paragraphs = (
     let src = "[A](http://a)\n\n[B](http://b)\n";
     let doc = Parser::parse(src);
     let links = collect_links(doc);
-    assert_eq(|_| "two paragraphs yield two links", links.get_size, 2);;
+    assert_eq(|_| "two paragraphs yield two links", links.@size, 2);;
     assert_eq(|_| "first link URL", links.@(0).@url, "http://a");;
     assert_eq(|_| "first link index", links.@(0).@index, 0);;
     assert_eq(|_| "first link display text", links.@(0).@display_text, "A");;
@@ -32,7 +32,7 @@ run_link_in_nested_list = (
     let src = "- [X](http://x)\n";
     let doc = Parser::parse(src);
     let links = collect_links(doc);
-    assert_eq(|_| "list item link enumerated", links.get_size, 1);;
+    assert_eq(|_| "list item link enumerated", links.@size, 1);;
     assert_eq(|_| "list item link URL", links.@(0).@url, "http://x");;
     assert_eq(|_| "list item link index", links.@(0).@index, 0)
 );
@@ -42,7 +42,7 @@ run_link_in_table_cell = (
     let src = "| Site |\n| --- |\n| [T](http://t) |\n";
     let doc = Parser::parse(src);
     let links = collect_links(doc);
-    assert_eq(|_| "table cell link enumerated", links.get_size, 1);;
+    assert_eq(|_| "table cell link enumerated", links.@size, 1);;
     assert_eq(|_| "table cell link URL", links.@(0).@url, "http://t")
 );
 
@@ -52,7 +52,7 @@ run_image_excluded = (
     let doc = Parser::parse(src);
     let links = collect_links(doc);
     assert_eq(|_| "image excluded; only the real link counts",
-        links.get_size, 1);;
+        links.@size, 1);;
     assert_eq(|_| "non-image link URL", links.@(0).@url, "http://l")
 );
 
@@ -61,7 +61,7 @@ run_index_matches_array_position = (
     let src = "[A](http://a) and [B](http://b) and [C](http://c)\n";
     let doc = Parser::parse(src);
     let links = collect_links(doc);
-    let n = links.get_size;
+    let n = links.@size;
     let ok = loop((true, 0), |(acc, i)| (
         if i >= n { break $ acc };
         let li = links.@(i);
@@ -86,7 +86,7 @@ run_link_inside_emph = (
     let src = "*see [here](http://here)*\n";
     let doc = Parser::parse(src);
     let links = collect_links(doc);
-    assert_eq(|_| "link nested inside emph enumerated", links.get_size, 1);;
+    assert_eq(|_| "link nested inside emph enumerated", links.@size, 1);;
     assert_eq(|_| "nested-in-emph URL", links.@(0).@url, "http://here")
 );
 

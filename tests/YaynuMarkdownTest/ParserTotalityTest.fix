@@ -5,7 +5,7 @@
 // promise on inputs that historically trip parsers: unbalanced
 // delimiters, deeply nested containers, ragged tables, gibberish.
 //
-// We only assert that a Document came back (and that `blocks.get_size`
+// We only assert that a Document came back (and that `blocks.@size`
 // is observable). Structural assertions belong in the per-feature tests;
 // here we are *only* protecting against panics and divergence.
 module ParserTotalityTest;
@@ -16,9 +16,9 @@ import Yaynu.Markdown.Parser;
 _total : String -> IO ();
 _total = |src| (
     let d = Parser::parse(src);
-    // Touching `blocks.get_size` forces evaluation enough to surface any
+    // Touching `blocks.@size` forces evaluation enough to surface any
     // hidden panic in lazy-construction paths.
-    let _ = d.@blocks.get_size;
+    let _ = d.@blocks.@size;
     pure()
 );
 

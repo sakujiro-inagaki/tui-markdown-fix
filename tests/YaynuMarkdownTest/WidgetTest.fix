@@ -26,7 +26,7 @@ _strip_trailing : String -> String;
 _strip_trailing = |s| (
     let lines = s.split("\n").map(|line| (
         let bs = line.get_bytes;
-        let raw = bs.get_size;
+        let raw = bs.@size;
         let nz = if raw > 0 && bs.@(raw - 1) == 0_U8 { raw - 1 } else { raw };
         let len = loop(nz, |i| (
             if i <= 0 { break $ 0 };
@@ -35,7 +35,7 @@ _strip_trailing = |s| (
         ));
         line.get_sub(0, len)
     )).to_array;
-    let m = lines.get_size;
+    let m = lines.@size;
     let last = loop(m, |i| (
         if i <= 0 { break $ 0 };
         if lines.@(i - 1) == "" { continue $ i - 1 };
@@ -49,7 +49,7 @@ run_new_parses_once = (
     let v = MarkdownView::new("hello");
     let p = Parser::parse("hello");
     assert_eq(|_| "MarkdownView::new(src).@document = Parser::parse(src)",
-        v.@document.@blocks.get_size, p.@blocks.get_size)
+        v.@document.@blocks.@size, p.@blocks.@size)
 );
 
 run_with_options_preserves : IO ();
@@ -58,7 +58,7 @@ run_with_options_preserves = (
     let opts2 = RenderOptions::default.set_wrap(false);
     let v2 = v.with_options(opts2);
     let same_scroll = v.@scroll == v2.@scroll;
-    let same_blocks = v.@document.@blocks.get_size == v2.@document.@blocks.get_size;
+    let same_blocks = v.@document.@blocks.@size == v2.@document.@blocks.@size;
     assert_eq(|_| "with_options preserves scroll", same_scroll, true);;
     assert_eq(|_| "with_options preserves document", same_blocks, true)
 );
@@ -92,7 +92,7 @@ run_scroll_past_end_blank = (
     // Every row should consist of spaces (the initial blank cells).
     let all_spaces = out.split("\n").to_array.to_iter.fold(true, |line, acc| (
         let bs = line.get_bytes;
-        let raw = bs.get_size;
+        let raw = bs.@size;
         let nz = if raw > 0 && bs.@(raw - 1) == 0_U8 { raw - 1 } else { raw };
         let only_spaces = loop((true, 0), |(ok, i)| (
             if i >= nz { break $ ok };

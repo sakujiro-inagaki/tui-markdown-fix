@@ -48,7 +48,7 @@ render_string = |src, opts, rect, buf| render(Parser::parse(src), opts, rect, bu
 estimate_height : Document -> RenderOptions -> I64 -> I64;
 estimate_height = |doc, opts, width| (
     let (lines, _next_idx) = render_blocks(doc.@blocks, opts, width, 0);
-    lines.get_size
+    lines.@size
 );
 
 // Source-DFS link enumeration paired with the row range of each link's
@@ -73,13 +73,13 @@ link_block_rows = |doc, opts, width| (
     if width <= 0 { [] };
     let all_links = collect_links(doc);
     let blocks = doc.@blocks;
-    let n = blocks.get_size;
+    let n = blocks.@size;
     if n == 0 { [] };
     let (result, _row, _link_idx, _i) = loop(([], 0, 0, 0), |(acc, row, link_idx, i)| (
         if i >= n { break $ (acc, row, link_idx, i) };
         let block = blocks.@(i);
         let (block_lines, next_link_idx) = render_block(block, opts, width, link_idx);
-        let h = block_lines.get_size;
+        let h = block_lines.@size;
         let row_start = row;
         let row_end = if h <= 0 { row } else { row + h - 1 };
         let acc2 = loop((acc, link_idx), |(a, k)| (
@@ -100,7 +100,7 @@ link_block_rows = |doc, opts, width| (
 _blit_lines : Array (Array (String, Style)) -> Rect -> Buffer
               -> (I64, Buffer);
 _blit_lines = |lines, rect, buf| (
-    let n = lines.get_size;
+    let n = lines.@size;
     let h = if n > rect.@height { rect.@height } else { n };
     let final_buf = loop((buf, 0), |(b, i)| (
         if i >= h { break $ b };
@@ -113,7 +113,7 @@ _blit_lines = |lines, rect, buf| (
 
 _write_line : Array (String, Style) -> Rect -> I64 -> Buffer -> Buffer;
 _write_line = |spans, rect, row, buf| (
-    let m = spans.get_size;
+    let m = spans.@size;
     let (final_buf, _) = loop((buf, 0, 0), |(b, x_off, i)| (
         if i >= m { break $ (b, x_off) };
         let (text, style) = spans.@(i);

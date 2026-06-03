@@ -16,7 +16,7 @@ _strip_trailing : String -> String;
 _strip_trailing = |s| (
     let lines = s.split("\n").map(|line| (
         let bs = line.get_bytes;
-        let raw = bs.get_size;
+        let raw = bs.@size;
         let nz = if raw > 0 && bs.@(raw - 1) == 0_U8 { raw - 1 } else { raw };
         let len = loop(nz, |i| (
             if i <= 0 { break $ 0 };
@@ -25,7 +25,7 @@ _strip_trailing = |s| (
         ));
         line.get_sub(0, len)
     )).to_array;
-    let m = lines.get_size;
+    let m = lines.@size;
     let last = loop(m, |i| (
         if i <= 0 { break $ 0 };
         if lines.@(i - 1) == "" { continue $ i - 1 };
@@ -85,7 +85,7 @@ run_nested_indentation = (
     let outer_at_0 = rows.@(0).find("•", 0).map(|i| i == 0).as_some_or(false);
     // The inner bullet lands on the third row (index 2); index 1 is the
     // separator blank row between outer paragraph and the nested list.
-    let inner_row = if rows.get_size > 2 { rows.@(2) } else { "" };
+    let inner_row = if rows.@size > 2 { rows.@(2) } else { "" };
     let inner_indented = inner_row.find("•", 0).map(|i| i > 0).as_some_or(false);
     assert_eq(|_| "outer item at col 0, inner item indented",
         outer_at_0 && inner_indented, true)

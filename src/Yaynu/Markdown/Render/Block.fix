@@ -26,7 +26,7 @@ render_blocks : Array Block -> RenderOptions -> I64 -> I64
                 -> (Array (Array (String, Style)), I64);
 render_blocks = |blocks, opts, width, start_idx| (
     if width <= 0 { ([], start_idx) };
-    let n = blocks.get_size;
+    let n = blocks.@size;
     if n == 0 { ([], start_idx) };
     loop((([], start_idx), 0), |((acc, idx), i)| (
         if i >= n { break $ (acc, idx) };
@@ -71,7 +71,7 @@ _render_heading : I64 -> Array Inline -> RenderOptions -> I64 -> I64
 _render_heading = |level, inlines, opts, width, idx| (
     let palette = opts.@style;
     let lvl_idx = if level < 1 { 0 } else if level > 6 { 5 } else { level - 1 };
-    let base = if lvl_idx < palette.@heading.get_size { palette.@heading.@(lvl_idx) }
+    let base = if lvl_idx < palette.@heading.@size { palette.@heading.@(lvl_idx) }
                else { palette.@text };
     let (toks, next_idx) = inlines_to_tokens(inlines, base, opts, idx);
     (wrap_tokens(width, toks), next_idx)
@@ -97,9 +97,9 @@ _render_html_block = |s, opts, width| (
     let style = opts.@style.@text;
     let raw_lines = s.split("\n").to_array;
     raw_lines.to_iter.fold([], |line, acc| (
-        let l = if line.get_size > 0 {
+        let l = if line.@size > 0 {
             let bs = line.get_bytes;
-            let n = bs.get_size;
+            let n = bs.@size;
             if n > 0 && bs.@(n - 1) == '\r' { line.get_sub(0, n - 1) } else { line }
         } else { line };
         let truncated = Width::truncate(width, l);
@@ -222,14 +222,14 @@ _format_code_body = |content, style, wrap_code, width| (
     let raw_lines = content.split("\n").to_array;
     // Drop a trailing empty line if the content ends in '\n'
     // (avoids an extra blank row at the bottom of code blocks).
-    let n_raw = raw_lines.get_size;
+    let n_raw = raw_lines.@size;
     let trimmed = if n_raw > 0 && raw_lines.@(n_raw - 1) == "" {
         Array::from_map(n_raw - 1, |i| raw_lines.@(i))
     } else { raw_lines };
     trimmed.to_iter.fold([], |raw, acc| (
-        let line = if raw.get_size > 0 {
+        let line = if raw.@size > 0 {
             let bs = raw.get_bytes;
-            let n = bs.get_size;
+            let n = bs.@size;
             if n > 0 && bs.@(n - 1) == '\r' { raw.get_sub(0, n - 1) } else { raw }
         } else { raw };
         if wrap_code {
@@ -248,7 +248,7 @@ _format_code_body = |content, style, wrap_code, width| (
 _char_wrap_line : String -> Style -> I64 -> Array (Array (String, Style));
 _char_wrap_line = |line, style, width| (
     let clusters = Width::iter_graphemes(line).to_array;
-    let n = clusters.get_size;
+    let n = clusters.@size;
     if n == 0 { [[]] };
     let (rows, cur, cur_w) = loop(([], "", 0, 0), |(rows, cur, cur_w, i)| (
         if i >= n { break $ (rows, cur, cur_w) };
@@ -291,7 +291,7 @@ _render_list : MarkdownList -> RenderOptions -> I64 -> I64 -> I64
 _render_list = |lst, opts, width, level, start_idx| (
     let palette = opts.@style;
     let items = lst.@items;
-    let n = items.get_size;
+    let n = items.@size;
     if n == 0 { ([], start_idx) };
     loop((([], start_idx), 0), |((acc, cur_idx), i)| (
         if i >= n { break $ (acc, cur_idx) };
@@ -321,7 +321,7 @@ _list_marker = |lst, opts, item, idx| (
                 (lst.@start + idx).to_string + "."
             } else {
                 let bms = opts.@bullet_markers;
-                if bms.get_size == 0 { "•" } else { bms.@(0) }
+                if bms.@size == 0 { "•" } else { bms.@(0) }
             }
         )
     }
@@ -341,7 +341,7 @@ _list_marker_style = |item, palette| (
 _prefix_item : Array (Array (String, Style)) -> String -> String -> Style -> I64 -> Style
                -> Array (Array (String, Style));
 _prefix_item = |lines, indent_str, marker, marker_style, prefix_w, text_style| (
-    let m = lines.get_size;
+    let m = lines.@size;
     if m == 0 { [] };
     let cont_indent = _pad_spaces(prefix_w);
     loop(([], 0), |(acc, i)| (

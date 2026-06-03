@@ -32,7 +32,7 @@ run_alignment = (
         Alignment::none()
     ];
     assert_eq(|_| "Alignment: 4 constructors round-trip",
-        alignments.get_size, 4);;
+        alignments.@size, 4);;
     let left_is_left = match alignments.@(0) { left() => true, _ => false };
     assert_eq(|_| "Alignment::left() matches as left", left_is_left, true);;
     let center_is_center = match alignments.@(1) { center() => true, _ => false };
@@ -51,14 +51,14 @@ run_inline = (
     assert_eq(|_| "Inline::text payload", txt.as_text, "hello");;
 
     let emp = Inline::emph([Inline::text("e")]);
-    assert_eq(|_| "Inline::emph holds one child", emp.as_emph.get_size, 1);;
+    assert_eq(|_| "Inline::emph holds one child", emp.as_emph.@size, 1);;
 
     let str = Inline::strong([Inline::text("s")]);
-    assert_eq(|_| "Inline::strong holds one child", str.as_strong.get_size, 1);;
+    assert_eq(|_| "Inline::strong holds one child", str.as_strong.@size, 1);;
 
     let strk = Inline::strikethrough([Inline::text("x")]);
     assert_eq(|_| "Inline::strikethrough holds one child",
-        strk.as_strikethrough.get_size, 1);;
+        strk.as_strikethrough.@size, 1);;
 
     let code = Inline::code("x = 1");
     assert_eq(|_| "Inline::code payload", code.as_code, "x = 1");;
@@ -66,7 +66,7 @@ run_inline = (
     let link = Inline::link(([Inline::text("Example")], "https://example.com"));
     let (link_content, link_url) = link.as_link;
     assert_eq(|_| "Inline::link URL", link_url, "https://example.com");;
-    assert_eq(|_| "Inline::link content length", link_content.get_size, 1);;
+    assert_eq(|_| "Inline::link content length", link_content.@size, 1);;
 
     let img = Inline::image(("logo", "https://example.com/x.png"));
     let (alt, img_url) = img.as_image;
@@ -131,7 +131,7 @@ run_list = (
         items: [plain, checked, unchecked]
     };
     assert_eq(|_| "Ordered list start preserved", ord.@start, 3);;
-    assert_eq(|_| "Ordered list has 3 items", ord.@items.get_size, 3);;
+    assert_eq(|_| "Ordered list has 3 items", ord.@items.@size, 3);;
     assert_eq(|_| "Tight is true", ord.@tight, true)
 );
 
@@ -151,12 +151,12 @@ run_table = (
         ]
     };
     assert_eq(|_| "Table column count matches headers",
-        table.@headers.get_size, 2);;
+        table.@headers.@size, 2);;
     assert_eq(|_| "Table alignment count matches headers",
-        table.@alignments.get_size, table.@headers.get_size);;
-    assert_eq(|_| "Table row count", table.@rows.get_size, 2);;
+        table.@alignments.@size, table.@headers.@size);;
+    assert_eq(|_| "Table row count", table.@rows.@size, 2);;
     assert_eq(|_| "Every row has the same column count as headers",
-        table.@rows.@(0).get_size, table.@headers.get_size)
+        table.@rows.@(0).@size, table.@headers.@size)
 );
 
 // --- Block + Document -------------------------------------------------
@@ -184,7 +184,7 @@ run_block_and_document = (
         inner_quote
     ]);
     let outer_kids = outer_quote.as_blockquote;
-    assert_eq(|_| "blockquote has 2 children", outer_kids.get_size, 2);;
+    assert_eq(|_| "blockquote has 2 children", outer_kids.@size, 2);;
     let nested_kid = outer_kids.@(1).as_blockquote.@(0);
     assert_eq(|_| "Nested blockquote preserves inner paragraph",
         _para_text(nested_kid), "inner");;
@@ -196,7 +196,7 @@ run_block_and_document = (
         items: [ListItem { task: Option::none(), blocks: [p] }]
     });
     assert_eq(|_| "list block carries MarkdownList",
-        list_block.as_list.@items.get_size, 1);;
+        list_block.as_list.@items.@size, 1);;
 
     let table_block = Block::table(Table {
         headers: [[Inline::text("h")]],
@@ -204,7 +204,7 @@ run_block_and_document = (
         rows: []
     });
     assert_eq(|_| "table block carries Table",
-        table_block.as_table.@headers.get_size, 1);;
+        table_block.as_table.@headers.@size, 1);;
 
     let tb = Block::thematic_break();
     let tb_is_tb = match tb { thematic_break() => true, _ => false };
@@ -215,11 +215,11 @@ run_block_and_document = (
 
     let doc = Document { blocks: [h, p, tb, html] };
     assert_eq(|_| "Document preserves block ordering and count",
-        doc.@blocks.get_size, 4);;
+        doc.@blocks.@size, 4);;
 
     let empty_doc = Document { blocks: [] };
     assert_eq(|_| "Empty document has 0 blocks",
-        empty_doc.@blocks.get_size, 0)
+        empty_doc.@blocks.@size, 0)
 );
 
 // --- Top-level entry --------------------------------------------------

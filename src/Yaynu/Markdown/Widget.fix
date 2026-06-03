@@ -96,14 +96,14 @@ namespace Frame {
         let (lines, _next_idx) = render_blocks(view.@document.@blocks,
                                                 view.@options, rect.@width, 0);
         let scroll = if view.@scroll < 0 { 0 } else { view.@scroll };
-        let n = lines.get_size;
+        let n = lines.@size;
         let skipped = if scroll >= n { [] } else {
             Array::from_map(n - scroll, |i| lines.@(scroll + i))
         };
         // Reuse `Render::render`'s line blitter by constructing a
         // pseudo-document — instead just re-create the loop here.
-        let h = if skipped.get_size > rect.@height { rect.@height }
-                else { skipped.get_size };
+        let h = if skipped.@size > rect.@height { rect.@height }
+                else { skipped.@size };
         let frame2 = loop((frame, 0), |(f, i)| (
             if i >= h { break $ f };
             let line = skipped.@(i);
@@ -179,7 +179,7 @@ handle_key = |k, v| (
 // internals. If they diverge, the snapshot tests will catch it.
 _write_spans : Array (String, Style) -> Rect -> I64 -> Buffer -> Buffer;
 _write_spans = |spans, rect, row, buf| (
-    let m = spans.get_size;
+    let m = spans.@size;
     let (final_buf, _) = loop((buf, 0, 0), |(b, x_off, i)| (
         if i >= m { break $ (b, x_off) };
         let (text, style) = spans.@(i);

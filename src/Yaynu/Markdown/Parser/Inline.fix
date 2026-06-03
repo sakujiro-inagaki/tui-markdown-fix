@@ -20,7 +20,7 @@ import Yaynu.Markdown.Ast;
 // Total: returns within finite time for any input, never panics.
 // Unmatched delimiters become literal text bytes.
 parse : String -> Array Inline;
-parse = |src| _scan(src, 0, src.get_size);
+parse = |src| _scan(src, 0, src.@size);
 
 // --- low-level byte predicates -----------------------------------------
 
@@ -346,7 +346,7 @@ _url_scheme_len : Array U8 -> I64 -> I64 -> I64;
 _url_scheme_len = |bytes, i, n| (
     let starts = |s : String| (
         let sb = s.get_bytes;
-        let sl = s.get_size;
+        let sl = s.@size;
         if i + sl > n { false }
         else {
             loop(0, |k| (

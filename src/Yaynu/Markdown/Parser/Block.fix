@@ -23,7 +23,7 @@ parse = |src| parse_lines(_split_lines(src));
 // recursion to avoid re-splitting the same string.
 parse_lines : Array String -> Array Block;
 parse_lines = |lines| (
-    let n = lines.get_size;
+    let n = lines.@size;
     loop((0, []), |(i, acc)| (
         if i >= n { break $ acc };
         let line = lines.@(i);
@@ -101,7 +101,7 @@ _dispatch = |lines, i, n, acc| (
 _split_lines : String -> Array String;
 _split_lines = |src| (
     src.split("\n").map(|line| (
-        let n = line.get_size;
+        let n = line.@size;
         if n > 0 && line.get_bytes.@(n - 1) == '\r' {
             line.get_sub(0, n - 1)
         } else {
@@ -117,7 +117,7 @@ _is_blank = |line| line.strip_spaces.is_empty;
 _count_leading : U8 -> String -> I64;
 _count_leading = |target, s| (
     let bytes = s.get_bytes;
-    let n = s.get_size;
+    let n = s.@size;
     loop(0, |i| (
         if i >= n { break $ i };
         if bytes.@(i) != target { break $ i };
@@ -134,7 +134,7 @@ _strip_lead_spaces_up_to : I64 -> String -> String;
 _strip_lead_spaces_up_to = |max, s| (
     let lead = _count_leading_spaces(s);
     let drop = if lead < max { lead } else { max };
-    s.get_sub(drop, s.get_size)
+    s.get_sub(drop, s.@size)
 );
 
 // --- ATX heading -------------------------------------------------------
@@ -149,15 +149,15 @@ _try_atx_heading = |line| (
     let lead = _count_leading_spaces(line);
     if lead > 3 { Option::none() }
     else {
-        let trimmed = line.get_sub(lead, line.get_size);
+        let trimmed = line.get_sub(lead, line.@size);
         let hashes = _count_leading('#', trimmed);
         if hashes < 1 || hashes > 6 { Option::none() }
-        else if hashes == trimmed.get_size {
+        else if hashes == trimmed.@size {
             // `###` with nothing after.
             Option::some(Block::heading((hashes, [])))
         }
         else {
-            let after = trimmed.get_sub(hashes, trimmed.get_size);
+            let after = trimmed.get_sub(hashes, trimmed.@size);
             // Must have a space separator before content.
             if !after.starts_with(" ") { Option::none() }
             else {
@@ -177,7 +177,7 @@ _is_thematic_break = |line| (
     let lead = _count_leading_spaces(line);
     if lead > 3 { false }
     else {
-        let trimmed = line.get_sub(lead, line.get_size);
+        let trimmed = line.get_sub(lead, line.@size);
         let first_b = trimmed.get_first_byte;
         match first_b {
             none() => false,
@@ -185,7 +185,7 @@ _is_thematic_break = |line| (
                 if b != '-' && b != '*' && b != '_' { false }
                 else {
                     let bytes = trimmed.get_bytes;
-                    let n = trimmed.get_size;
+                    let n = trimmed.@size;
                     let (count, ok) = loop((0, 0, true), |(i, count, ok)| (
                         if !ok { break $ (count, false) };
                         if i >= n { break $ (count, true) };
@@ -209,7 +209,7 @@ _fence_marker = |line| (
     let lead = _count_leading_spaces(line);
     if lead > 3 { Option::none() }
     else {
-        let trimmed = line.get_sub(lead, line.get_size);
+        let trimmed = line.get_sub(lead, line.@size);
         let first_b = trimmed.get_first_byte;
         match first_b {
             none() => Option::none(),
@@ -219,7 +219,7 @@ _fence_marker = |line| (
                     let count = _count_leading(b, trimmed);
                     if count < 3 { Option::none() }
                     else {
-                        let after = trimmed.get_sub(count, trimmed.get_size);
+                        let after = trimmed.get_sub(count, trimmed.@size);
                         let info = after.strip_spaces;
                         Option::some((b, count, info))
                     }
@@ -252,12 +252,12 @@ _is_closing_fence = |line, marker, opening_len| (
     let lead = _count_leading_spaces(line);
     if lead > 3 { false }
     else {
-        let trimmed = line.get_sub(lead, line.get_size);
+        let trimmed = line.get_sub(lead, line.@size);
         let count = _count_leading(marker, trimmed);
         if count < opening_len { false }
         else {
             // Nothing but spaces after the fence run.
-            let after = trimmed.get_sub(count, trimmed.get_size);
+            let after = trimmed.get_sub(count, trimmed.@size);
             after.strip_spaces.is_empty
         }
     }
@@ -270,7 +270,7 @@ _is_indented_code_line = |line| (
     if _is_blank(line) { false }
     else {
         let bytes = line.get_bytes;
-        let n = line.get_size;
+        let n = line.@size;
         n >= 4 && bytes.@(0) == ' ' && bytes.@(1) == ' ' &&
         bytes.@(2) == ' ' && bytes.@(3) == ' '
     }
@@ -283,7 +283,7 @@ _take_indented_code = |lines, i, n| (
         let line = lines.@(k);
         if _is_indented_code_line(line) {
             // Strip the first 4 spaces.
-            let stripped = line.get_sub(4, line.get_size);
+            let stripped = line.get_sub(4, line.@size);
             continue $ (k + 1, acc.push_back(stripped))
         };
         // Blank lines within an indented code block: include them but
@@ -305,7 +305,7 @@ _is_blockquote_line = |line| (
     let lead = _count_leading_spaces(line);
     if lead > 3 { false }
     else {
-        let trimmed = line.get_sub(lead, line.get_size);
+        let trimmed = line.get_sub(lead, line.@size);
         trimmed.starts_with(">")
     }
 );
@@ -315,12 +315,12 @@ _is_blockquote_line = |line| (
 _strip_blockquote_marker : String -> String;
 _strip_blockquote_marker = |line| (
     let lead = _count_leading_spaces(line);
-    let trimmed = line.get_sub(lead, line.get_size);
+    let trimmed = line.get_sub(lead, line.@size);
     // Drop the leading '>'.
-    let after_gt = trimmed.get_sub(1, trimmed.get_size);
+    let after_gt = trimmed.get_sub(1, trimmed.@size);
     // Drop one optional space.
     if after_gt.starts_with(" ") {
-        after_gt.get_sub(1, after_gt.get_size)
+        after_gt.get_sub(1, after_gt.@size)
     } else {
         after_gt
     }
@@ -361,14 +361,14 @@ _detect_list_marker = |line| (
     let lead = _count_leading_spaces(line);
     if lead > 3 { Option::none() }
     else {
-        let trimmed = line.get_sub(lead, line.get_size);
+        let trimmed = line.get_sub(lead, line.@size);
         let first = trimmed.get_first_byte;
         match first {
             none() => Option::none(),
             some(b) => (
                 // Unordered: -, *, +
                 if (b == '-' || b == '*' || b == '+') &&
-                   (trimmed.get_size >= 2 && trimmed.get_bytes.@(1) == ' ') {
+                   (trimmed.@size >= 2 && trimmed.get_bytes.@(1) == ' ') {
                     let after_marker_start = lead + 2;
                     let (task, body_start) = _detect_task_marker(line, after_marker_start);
                     Option::some(ListMarker {
@@ -398,7 +398,7 @@ _detect_list_marker = |line| (
 _scan_ordered_marker : String -> Option (I64, I64);
 _scan_ordered_marker = |s| (
     let bytes = s.get_bytes;
-    let n = s.get_size;
+    let n = s.@size;
     let digit_end = loop(0, |i| (
         if i >= n { break $ i };
         let b = bytes.@(i);
@@ -426,7 +426,7 @@ _scan_ordered_marker = |s| (
 _detect_task_marker : String -> I64 -> (Option Bool, I64);
 _detect_task_marker = |line, pos| (
     let bytes = line.get_bytes;
-    let n = line.get_size;
+    let n = line.@size;
     if pos + 3 > n { (Option::none(), pos) }
     else { if bytes.@(pos) != '[' { (Option::none(), pos) }
     else { if bytes.@(pos + 2) != ']' { (Option::none(), pos) }
@@ -517,7 +517,7 @@ _take_list_item = |lines, i, n, marker| (
 
     // First line: take everything after the marker (already past the task
     // checkbox if any).
-    let first_body = lines.@(i).get_sub(body_indent, lines.@(i).get_size);
+    let first_body = lines.@(i).get_sub(body_indent, lines.@(i).@size);
 
     // Collect continuation lines: lines that are blank, or indented at
     // least `body_indent`.
@@ -543,7 +543,7 @@ _take_list_item = |lines, i, n, marker| (
             break $ (acc, k)
         };
         // Strip the indent.
-        let stripped = line.get_sub(body_indent, line.get_size);
+        let stripped = line.get_sub(body_indent, line.@size);
         continue $ (k + 1, acc.push_back(stripped))
     ));
 
@@ -566,7 +566,7 @@ _looks_like_table_header = |line| line.find("|", 0).is_some && !_is_blank(line);
 _is_table_delimiter_row : String -> Bool;
 _is_table_delimiter_row = |line| (
     let cells = _split_table_row(line);
-    if cells.get_size == 0 { false }
+    if cells.@size == 0 { false }
     else {
         cells.to_iter.fold(true, |c, acc|
             acc && _is_delimiter_cell(c.strip_spaces)
@@ -576,7 +576,7 @@ _is_table_delimiter_row = |line| (
 
 _is_delimiter_cell : String -> Bool;
 _is_delimiter_cell = |c| (
-    let n = c.get_size;
+    let n = c.@size;
     if n == 0 { false }
     else {
         let bytes = c.get_bytes;
@@ -613,11 +613,11 @@ _cell_alignment = |c| (
 _split_table_row : String -> Array String;
 _split_table_row = |line| (
     let trimmed = line.strip_spaces;
-    let n = trimmed.get_size;
+    let n = trimmed.@size;
     if n == 0 { [] }
     else {
         let body = if trimmed.starts_with("|") { trimmed.get_sub(1, n) } else { trimmed };
-        let n2 = body.get_size;
+        let n2 = body.@size;
         let body = if body.ends_with("|") { body.get_sub(0, n2 - 1) } else { body };
         body.split("|").to_array
     }
@@ -631,9 +631,9 @@ _try_take_table = |lines, i, n| (
     else {
         let header_cells = _split_table_row(lines.@(i));
         let delim_cells = _split_table_row(lines.@(i + 1));
-        let col_count = header_cells.get_size;
+        let col_count = header_cells.@size;
         if col_count == 0 { Option::none() }
-        else { if delim_cells.get_size != col_count { Option::none() }
+        else { if delim_cells.@size != col_count { Option::none() }
         else {
             let headers = header_cells.to_iter.map(|c|
                 Inline::parse(c.strip_spaces)
@@ -648,7 +648,7 @@ _try_take_table = |lines, i, n| (
                 let cells = _split_table_row(line);
                 // Pad / truncate to col_count.
                 let padded = Array::from_map(col_count, |c|
-                    if c < cells.get_size {
+                    if c < cells.@size {
                         Inline::parse(cells.@(c).strip_spaces)
                     } else {
                         []
@@ -668,7 +668,7 @@ _try_take_table = |lines, i, n| (
 _looks_like_html_block : String -> Bool;
 _looks_like_html_block = |line| (
     let lead = _count_leading_spaces(line);
-    let trimmed = line.get_sub(lead, line.get_size);
+    let trimmed = line.get_sub(lead, line.@size);
     trimmed.starts_with("<")
 );
 
@@ -704,7 +704,7 @@ _is_paragraph_terminator = |line| (
 _has_trailing_double_space : String -> Bool;
 _has_trailing_double_space = |line| (
     let bytes = line.get_bytes;
-    let n = line.get_size;
+    let n = line.@size;
     n >= 2 && bytes.@(n - 1) == ' ' && bytes.@(n - 2) == ' '
 );
 
@@ -722,7 +722,7 @@ _take_paragraph = |lines, i, n| (
         continue $ (k + 1, acc.push_back(line))
     ));
     // Build the inline stream with soft/hard breaks between lines.
-    let m = collected.get_size;
+    let m = collected.@size;
     let inlines = loop((0, []), |(k, acc)| (
         if k >= m { break $ acc };
         let line = collected.@(k);

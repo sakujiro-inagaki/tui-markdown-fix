@@ -183,7 +183,7 @@ collect_links = |doc| _collect_blocks(doc.@blocks, []);
 // advance the global link counter past links inside cells without
 // having to tokenize them (table cells render as plain text).
 count_links_in_inlines : Array Inline -> I64;
-count_links_in_inlines = |xs| _collect_inlines(xs, []).get_size;
+count_links_in_inlines = |xs| _collect_inlines(xs, []).@size;
 
 _collect_blocks : Array Block -> Array LinkInfo -> Array LinkInfo;
 _collect_blocks = |blocks, acc| (
@@ -227,7 +227,7 @@ _collect_inline = |i, acc| (
         strikethrough(kids) => _collect_inlines(kids, acc),
         code(_)             => acc,
         link((kids, url))   => (
-            let idx = acc.get_size;
+            let idx = acc.@size;
             let info = LinkInfo {
                 index        : idx,
                 url          : url,
