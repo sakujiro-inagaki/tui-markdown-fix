@@ -1,4 +1,4 @@
-proj_file_hash = "cc92dd6f19a9c36e3071deacaa9335d7"
+proj_file_hash = "d4cb5c687a0fbf1a11890b525ca2f2a5"
 
 [[dependencies]]
 name = "term"
@@ -11,9 +11,9 @@ rev = "f47a8ab07a475f25072822ddfd9d581dc9bcbecc"
 
 [[dependencies]]
 name = "tui"
-version = "0.2.0"
-path = ".fixlang/deps/tui_0.2.0"
+version = "0.2.1"
+path = ".fixlang/deps/tui_0.2.1"
 
 [dependencies.git]
 repo = "https://github.com/sakujiro-inagaki/tui-fix.git"
-rev = "7f76ea43594e52f153bf433384786c9875895c35"
+rev = "4cf946a5721c30d0bdb1cd8c8d8295ac345cc02a"

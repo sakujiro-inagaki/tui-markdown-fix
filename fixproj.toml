@@ -39,19 +39,7 @@ files = [
     "tests/YaynuMarkdownTest/SelectedLinkTest.fix",
 ]
 
-## tui-fix and term-fix ship C shims that hold process-wide state
-## (ambiguous-width override, signal handlers). Fix does not propagate
-## a dependency's `static_links` / `library_paths` into the consumer
-## project, so we re-declare them here pointing at the installed
-## dep directories. If those deps are reinstalled at a different
-## version, update the paths below to match.
-static_links  = ["tui_shim", "term_shim"]
-library_paths = [
-    ".fixlang/deps/tui_0.2.0/c_src",
-    ".fixlang/deps/term_0.2.0/c_src"
-]
-
 [[dependencies]]
 name = "tui"
-version = "0.2.0"
+version = "0.2.1"
 git = { url = "https://github.com/sakujiro-inagaki/tui-fix.git" }
